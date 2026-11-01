@@ -154,7 +154,7 @@ export function getUserEmail() {
   if (state.currentUser && state.currentUser.email) {
     return state.currentUser.email.trim().toLowerCase();
   }
-  return 'default_student@phitomedia.eg';
+  return 'guest_student@phitomedia.eg';
 }
 
 export function getCVStorageKey() {
@@ -165,49 +165,9 @@ export function getPortfolioStorageKey() {
   return `tima_portfolio_${getUserEmail()}`;
 }
 
-// Default initial works for student portfolio so it's fully populated and active on first load
-export const DEFAULT_PORTFOLIO_ITEMS = [
-  {
-    id: 'work-1',
-    title: 'فيلم وثائقي: نبض النيل والتراث المصري',
-    type: 'فيديو',
-    fileUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-    fileName: 'documentary_nile_heritage.mp4',
-    fileSizeStr: '15.2 MB',
-    desc: 'وثائقي ميداني يرصد الحرف التراثية الأصيلة على ضفاف النيل مع زوايا تصوير سينمائية وهندسة صوت احترافية.',
-    tools: 'Sony FX3, DaVinci Resolve, Rode Wireless',
-    date: '2025-05-20',
-    mode: 'file',
-    views: 124
-  },
-  {
-    id: 'work-2',
-    title: 'تصميم وهوية بصرية كاملة لمجلة صوت الصحافة',
-    type: 'تصميم',
-    fileUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=1200&q=80',
-    fileName: 'press_magazine_cover.png',
-    fileSizeStr: '3.8 MB',
-    desc: 'تصميم غلاف وتنسيق تايبوجرافي وهوية بصرية كاملة لمجلة التخرج السنوية.',
-    tools: 'Photoshop, Illustrator, InDesign',
-    date: '2025-04-18',
-    mode: 'file',
-    views: 88
-  },
-  {
-    id: 'work-3',
-    title: 'تحقيق استقصائي: كواليس وتحديات سوق العمل الإعلامي',
-    type: 'تحقيق',
-    url: 'https://youtube.com',
-    fileUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-    fileName: 'investigative_media_market.pdf',
-    fileSizeStr: '2.4 MB',
-    desc: 'تحقيق استقصائي معمق مبني على استبيان مع 40 مسؤول توظيف وصحفي شاب حول متطلبات القنوات الفضائية والمنصات الرقمية.',
-    tools: 'صحافة البيانات, Google Trends',
-    date: '2025-03-12',
-    mode: 'file',
-    views: 210
-  }
-];
+// Default initial works for student portfolio
+export const DEFAULT_PORTFOLIO_ITEMS = [];
+
 
 // Load CV & Portfolio for current user
 export function loadCVAndPortfolio() {

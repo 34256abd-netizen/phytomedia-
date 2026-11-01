@@ -394,7 +394,7 @@
           <i data-lucide="help-circle" class="w-3.5 h-3.5 text-purple-300"></i>
           <span>حول φ To Media</span>
         </button>
-        <button id="nav-admin-btn" onclick="window.phiApp.checkAdminAccess()" class="hidden px-3 py-1.5 rounded-xl font-black text-amber-300 hover:text-white bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/40 transition-all items-center gap-1.5 shadow-sm">
+        <button id="nav-admin-btn" onclick="window.phiApp.checkAdminAccess()" class="inline-flex px-3 py-1.5 rounded-xl font-black text-amber-300 hover:text-white bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/40 transition-all items-center gap-1.5 shadow-sm cursor-pointer">
           <i data-lucide="shield-alert" class="w-3.5 h-3.5 text-amber-400"></i>
           <span>لوحة الإدارة ⚙️</span>
         </button>
@@ -562,7 +562,7 @@
               اصنع سيرة ذاتية بمعايير ATS، ونظم مشاريعك، واحصل على تقييم 0-99 لمهاراتك، وشارك في معمل التحديات وحجز جلسات الخبراء.
             </p>
           </div>
-          <button class="w-full mt-8 py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#EC4899] text-white font-black text-sm shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2">
+          <button onclick="window.phiApp.openRoleSignup('student')" class="w-full mt-8 py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#EC4899] text-white font-black text-sm shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2 cursor-pointer">
             <span>دخول كطالب إعلام</span>
             <i data-lucide="arrow-left" class="w-4 h-4"></i>
           </button>
@@ -583,7 +583,7 @@
               قدّم خبرتك العملية في المونتاج أو الصحافة أو التصوير أو الإذاعة، واستقبل طلبات الحجز الفردية وتابع أرباحك وتقييماتك.
             </p>
           </div>
-          <button class="w-full mt-8 py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#EC4899] text-white font-black text-sm shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2">
+          <button onclick="window.phiApp.openRoleSignup('mentor')" class="w-full mt-8 py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#EC4899] text-white font-black text-sm shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2 cursor-pointer">
             <span>دخول كخبير / منتور</span>
             <i data-lucide="arrow-left" class="w-4 h-4"></i>
           </button>
@@ -604,12 +604,20 @@
               تصفح الـ Talent Pool لطلاب مصر بالفلترة حسب مهارات بطاقة Tima، وانشر فرص التدريب والتوظيف واستقبل المتقدمين.
             </p>
           </div>
-          <button class="w-full mt-8 py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#EC4899] text-white font-black text-sm shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2">
+          <button onclick="window.phiApp.openRoleSignup('company')" class="w-full mt-8 py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#EC4899] text-white font-black text-sm shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2 cursor-pointer">
             <span>دخول كمؤسسة إعلامية</span>
             <i data-lucide="arrow-left" class="w-4 h-4"></i>
           </button>
         </div>
 
+      </div>
+
+      <!-- Admin Portal Quick Entry Banner -->
+      <div class="mt-10 text-center">
+        <button onclick="window.phiApp.openAdminLockModal()" class="px-7 py-3.5 rounded-2xl bg-[#1E1B4B] hover:bg-[#2E1065] text-amber-300 border border-amber-400/40 font-bold text-xs sm:text-sm shadow-xl transition-all inline-flex items-center gap-2 cursor-pointer hover:scale-105">
+          <i data-lucide="shield-alert" class="w-4 h-4 text-amber-400"></i>
+          <span>تسجيل دخول إدارة المنظومة (Super Admin) ⚙️</span>
+        </button>
       </div>
 
     </section>
@@ -3269,7 +3277,7 @@
       <i data-lucide="help-circle" class="w-5 h-5"></i>
       <span class="text-[10px]">حول φ</span>
     </button>
-    <button id="mobile-bottom-nav-admin" onclick="window.phiApp.checkAdminAccess()" class="hidden flex-col items-center justify-center gap-1 text-amber-300 hover:text-white transition-all">
+    <button id="mobile-bottom-nav-admin" onclick="window.phiApp.checkAdminAccess()" class="flex flex-col items-center justify-center gap-1 text-amber-300 hover:text-white transition-all cursor-pointer">
       <i data-lucide="shield-alert" class="w-5 h-5 text-amber-400"></i>
       <span class="text-[10px] font-bold">الإدارة</span>
     </button>

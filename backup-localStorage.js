@@ -173,12 +173,17 @@ export function loadFromLocalStorage(state, INITIAL_DATA, checkAndApplyAutoBlock
     try { state.currentUser = JSON.parse(storedUser); } catch (e) { state.currentUser = null; }
   }
 
+  const isMockId = (id) => typeof id === 'string' && /^(mentor-[1-4]|stud-[1-8]|job-[1-3]|app-[1-2]|ch-[1-5]|sub-1|book-[1-2]|rep-seed-[1-2]|verif-[1-2]|ip-[1-2])$/.test(id);
+
   // Mentors
   const storedMentors = localStorage.getItem(STORAGE_KEY_MENTORS);
   if (storedMentors) {
-    try { state.mentors = JSON.parse(storedMentors); } catch (e) { state.mentors = [...INITIAL_DATA.mentors]; }
+    try {
+      const parsed = JSON.parse(storedMentors);
+      state.mentors = Array.isArray(parsed) ? parsed.filter(m => !isMockId(m.id)) : [];
+    } catch (e) { state.mentors = []; }
   } else {
-    state.mentors = [...INITIAL_DATA.mentors];
+    state.mentors = [];
   }
 
   // Students
@@ -186,115 +191,100 @@ export function loadFromLocalStorage(state, INITIAL_DATA, checkAndApplyAutoBlock
   if (storedStudents) {
     try {
       const parsed = JSON.parse(storedStudents);
-      state.students = parsed.map(s => {
-        const init = INITIAL_DATA.students.find(x => x.id === s.id);
-        return {
-          ...init,
-          ...s,
-          card_id: s.card_id || s.id,
-          OVR: Number(s.OVR || s.overall || (init ? init.OVR : 90)),
-          skill: s.skill || (init ? init.skill : [s.position || 'إعلام']),
-          transcript: s.transcript || (init ? init.transcript : `${s.university || ''} - ${s.department || ''}`),
-          location: s.location || (init ? init.location : 'القاهرة')
-        };
-      });
-      INITIAL_DATA.students.forEach(is => {
-        if (!state.students.some(s => s.id === is.id)) {
-          state.students.push(is);
-        }
-      });
+      state.students = Array.isArray(parsed) ? parsed.filter(s => !isMockId(s.id)) : [];
     } catch (e) {
-      state.students = [...INITIAL_DATA.students];
+      state.students = [];
     }
   } else {
-    state.students = [...INITIAL_DATA.students];
+    state.students = [];
   }
 
   // Jobs
   const storedJobs = localStorage.getItem(STORAGE_KEY_JOBS);
   if (storedJobs) {
-    try { state.jobs = JSON.parse(storedJobs); } catch (e) { state.jobs = [...INITIAL_DATA.jobs]; }
+    try {
+      const parsed = JSON.parse(storedJobs);
+      state.jobs = Array.isArray(parsed) ? parsed.filter(j => !isMockId(j.id)) : [];
+    } catch (e) { state.jobs = []; }
   } else {
-    state.jobs = [...INITIAL_DATA.jobs];
+    state.jobs = [];
   }
 
   // Applications
   const storedApps = localStorage.getItem(STORAGE_KEY_APPLICATIONS);
   if (storedApps) {
-    try { state.applications = JSON.parse(storedApps); } catch (e) { state.applications = [...INITIAL_DATA.applications]; }
+    try {
+      const parsed = JSON.parse(storedApps);
+      state.applications = Array.isArray(parsed) ? parsed.filter(a => !isMockId(a.id)) : [];
+    } catch (e) { state.applications = []; }
   } else {
-    state.applications = [...INITIAL_DATA.applications];
+    state.applications = [];
   }
 
   // Challenges
   const storedCh = localStorage.getItem(STORAGE_KEY_CHALLENGES);
   if (storedCh) {
-    try { state.challenges = JSON.parse(storedCh); } catch (e) { state.challenges = [...INITIAL_DATA.labChallenges]; }
+    try {
+      const parsed = JSON.parse(storedCh);
+      state.challenges = Array.isArray(parsed) ? parsed.filter(c => !isMockId(c.id)) : [];
+    } catch (e) { state.challenges = []; }
   } else {
-    state.challenges = [...INITIAL_DATA.labChallenges];
+    state.challenges = [];
   }
 
   // Lab Submissions
   const storedSubs = localStorage.getItem(STORAGE_KEY_SUBMISSIONS);
   if (storedSubs) {
-    try { state.submissions = JSON.parse(storedSubs); } catch (e) { state.submissions = [...(INITIAL_DATA.submissions || [])]; }
+    try {
+      const parsed = JSON.parse(storedSubs);
+      state.submissions = Array.isArray(parsed) ? parsed.filter(s => !isMockId(s.id)) : [];
+    } catch (e) { state.submissions = []; }
   } else {
-    state.submissions = [...(INITIAL_DATA.submissions || [])];
+    state.submissions = [];
   }
 
   // Bookings
   const storedBookings = localStorage.getItem(STORAGE_KEY_BOOKINGS);
   if (storedBookings) {
-    try { state.bookings = JSON.parse(storedBookings); } catch (e) { state.bookings = []; }
+    try {
+      const parsed = JSON.parse(storedBookings);
+      state.bookings = Array.isArray(parsed) ? parsed.filter(b => !isMockId(b.id)) : [];
+    } catch (e) { state.bookings = []; }
   } else {
-    state.bookings = [
-      {
-        id: 'book-1',
-        mentorId: 'mentor-1',
-        mentorName: 'أحمد',
-        studentName: 'مريم حسام شريف',
-        day: 'الثلاثاء القادم',
-        time: '7:00 مساءً',
-        question: 'مراجعة المونتاج الصوتي والـ L-Cuts في فيلم التخرج القصير',
-        amount: 200,
-        status: 'مؤكدة'
-      },
-      {
-        id: 'book-2',
-        mentorId: 'mentor-2',
-        mentorName: 'سارة',
-        studentName: 'عمر شريف الشناوي',
-        day: 'الأربعاء القادم',
-        time: '5:00 مساءً',
-        question: 'تدقيق المصادر في تحقيق استقصائي حول سوق الخردة',
-        amount: 180,
-        status: 'مؤكدة'
-      }
-    ];
+    state.bookings = [];
   }
 
   // Tima Reports
   const storedReports = localStorage.getItem(STORAGE_KEY_REPORTS);
   if (storedReports) {
-    try { state.reports = JSON.parse(storedReports); } catch (e) { state.reports = [...(INITIAL_DATA.initialReports || [])]; }
+    try {
+      const parsed = JSON.parse(storedReports);
+      state.reports = Array.isArray(parsed) ? parsed.filter(r => !isMockId(r.id)) : [];
+    } catch (e) { state.reports = []; }
   } else {
-    state.reports = [...(INITIAL_DATA.initialReports || [])];
+    state.reports = [];
   }
 
   // Tima Verifications
   const storedVerifications = localStorage.getItem(STORAGE_KEY_VERIFICATIONS);
   if (storedVerifications) {
-    try { state.verifications = JSON.parse(storedVerifications); } catch (e) { state.verifications = [...(INITIAL_DATA.initialVerifications || [])]; }
+    try {
+      const parsed = JSON.parse(storedVerifications);
+      state.verifications = Array.isArray(parsed) ? parsed.filter(v => !isMockId(v.id)) : [];
+    } catch (e) { state.verifications = []; }
   } else {
-    state.verifications = [...(INITIAL_DATA.initialVerifications || [])];
+    state.verifications = [];
   }
 
   // Blacklist IPs
   const storedBlacklist = localStorage.getItem(STORAGE_KEY_BLACKLIST_IPS);
   if (storedBlacklist) {
-    try { state.blacklistIps = JSON.parse(storedBlacklist); } catch (e) { state.blacklistIps = [...(INITIAL_DATA.initialBlacklistIps || [])]; }
+    try {
+      const parsed = JSON.parse(storedBlacklist);
+      state.blacklistIps = Array.isArray(parsed) ? parsed.filter(ip => !isMockId(ip.id)) : [];
+    } catch (e) { state.blacklistIps = []; }
   } else {
-    state.blacklistIps = [...(INITIAL_DATA.initialBlacklistIps || [])];
+    state.blacklistIps = [];
   }
 
   if (typeof checkAndApplyAutoBlock === 'function') {
@@ -317,7 +307,7 @@ export function loadFromLocalStorage(state, INITIAL_DATA, checkAndApplyAutoBlock
   if (storedPoints !== null) {
     state.totalPoints = Math.max(0, parseInt(storedPoints) || 0);
   } else {
-    state.totalPoints = 4200;
+    state.totalPoints = 0;
   }
 
   const storedPrestige = localStorage.getItem(STORAGE_KEY_PRESTIGE);

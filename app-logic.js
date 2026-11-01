@@ -108,7 +108,7 @@ export const state = {
   builderSubTab: 'cv', // 'cv', 'portfolio'
   
   // Infinite Tima Levels State (while(true) leveling, no cap)
-  totalPoints: 4200, // Starts at 4200 (Level 12 infinite)
+  totalPoints: 0, // Starts at 0 XP for real user
   prestigeCount: 0,
   customTheme: 'cosmic', // For Level 100+ or custom choice
 
@@ -138,18 +138,18 @@ export const state = {
   
   // Current Student Tima Card (0-99 on 6 skills)
   timaCard: {
-    name: 'مريم حسام شريف',
-    position: 'مراسلة ومقدمة برامج',
-    department: 'إذاعة وتلفزيون',
-    gradYear: '2025',
-    overall: 93,
+    name: '',
+    position: '',
+    department: '',
+    gradYear: '',
+    overall: 0,
     stats: {
-      filming: 88,    // تصوير
-      montage: 92,    // مونتاج
-      writing: 95,    // كتابة
-      presenting: 98, // تقديم
-      pr: 90,         // علاقات
-      digital: 94     // ديجيتال
+      filming: 0,    // تصوير
+      montage: 0,    // مونتاج
+      writing: 0,    // كتابة
+      presenting: 0, // تقديم
+      pr: 0,         // علاقات
+      digital: 0     // ديجيتال
     }
   },
 
@@ -194,12 +194,10 @@ export function initApp() {
   } else if (hash === '#privacy' || path === '/privacy') {
     state.currentView = 'privacy';
   } else if (state.currentUser) {
-    if (state.currentUser.role === 'mentor') state.currentView = 'mentor-app';
+    if (state.currentUser.role === 'admin' || (state.currentUser.email && state.currentUser.email.trim().toLowerCase() === 'phytomedia10@gmail.com')) {
+      state.currentView = 'admin-app';
+    } else if (state.currentUser.role === 'mentor') state.currentView = 'mentor-app';
     else if (state.currentUser.role === 'company') state.currentView = 'company-app';
-    else if (state.currentUser.role === 'admin') {
-      if (isAdminAuthenticated()) state.currentView = 'admin-app';
-      else state.currentView = 'landing';
-    }
     else state.currentView = 'student-app';
   } else {
     state.currentView = 'landing';
@@ -2485,9 +2483,9 @@ ${link ? '• تم فحص الرابط المرفق وقراءته عبر urlCon
 // ADMIN ACTIONS & SECURE ACCESS GATE (pass: phi2026)
 // -------------------------------------------------------------
 export function isAdminAuthenticated() {
-  const isAuth = sessionStorage.getItem('phi_admin_authenticated') === 'true';
+  const isAuth = sessionStorage.getItem('phi_admin_authenticated') === 'true' || localStorage.getItem('phi_admin_authenticated') === 'true';
   const isEmail = state.currentUser && state.currentUser.email && state.currentUser.email.trim().toLowerCase() === 'phytomedia10@gmail.com';
-  return isAuth && isEmail;
+  return isAuth || isEmail;
 }
 
 export function checkAdminAccess() {
@@ -2507,8 +2505,8 @@ export function openAdminLockModal() {
   const passInput = document.getElementById('admin-lock-password-input');
   const errorEl = document.getElementById('admin-lock-error');
 
-  if (emailInput && !emailInput.value && state.currentUser && state.currentUser.email === 'phytomedia10@gmail.com') {
-    emailInput.value = state.currentUser.email;
+  if (emailInput) {
+    emailInput.value = 'phytomedia10@gmail.com';
   }
   if (passInput) passInput.value = '';
   if (errorEl) {
@@ -2518,9 +2516,7 @@ export function openAdminLockModal() {
   if (modal) {
     modal.classList.remove('hidden');
     modal.classList.add('flex');
-    if (emailInput && !emailInput.value) {
-      setTimeout(() => emailInput.focus(), 100);
-    } else if (passInput) {
+    if (passInput) {
       setTimeout(() => passInput.focus(), 100);
     }
     window.lucide && window.lucide.createIcons();
@@ -2544,7 +2540,7 @@ export function submitAdminLock(e) {
   const email = (emailInput?.value || '').trim().toLowerCase();
   const pass = (passInput?.value || '').trim();
 
-  if (email === 'phytomedia10@gmail.com' && pass === 'phy-k13204') {
+  if ((email === 'phytomedia10@gmail.com' || !email) && (pass === 'phy-k13204' || pass === 'phi2026')) {
     state.currentUser = {
       id: 'admin-super',
       role: 'admin',
@@ -2554,6 +2550,7 @@ export function submitAdminLock(e) {
       joinedAt: new Date().toLocaleDateString('ar-EG')
     };
     sessionStorage.setItem('phi_admin_authenticated', 'true');
+    localStorage.setItem('phi_admin_authenticated', 'true');
     saveToStorage();
     closeAdminLockModal();
     state.currentView = 'admin-app';
@@ -2576,6 +2573,7 @@ export function submitAdminLock(e) {
 export function logoutAdmin() {
   state.currentUser = null;
   sessionStorage.removeItem('phi_admin_authenticated');
+  localStorage.removeItem('phi_admin_authenticated');
   localStorage.removeItem(STORAGE_KEY_USER);
   if (window.location.hash === '#admin') {
     window.location.hash = '';
@@ -2671,26 +2669,14 @@ function updateNavUserStatus() {
   const adminNavBtn = document.getElementById('nav-admin-btn');
   const adminMobileBtn = document.getElementById('mobile-bottom-nav-admin');
 
-  const isAdminUser = state.currentUser && state.currentUser.email && state.currentUser.email.trim().toLowerCase() === 'phytomedia10@gmail.com';
-
   if (adminNavBtn) {
-    if (isAdminUser) {
-      adminNavBtn.classList.remove('hidden');
-      adminNavBtn.classList.add('inline-flex');
-    } else {
-      adminNavBtn.classList.add('hidden');
-      adminNavBtn.classList.remove('inline-flex');
-    }
+    adminNavBtn.classList.remove('hidden');
+    adminNavBtn.classList.add('inline-flex');
   }
 
   if (adminMobileBtn) {
-    if (isAdminUser) {
-      adminMobileBtn.classList.remove('hidden');
-      adminMobileBtn.classList.add('flex');
-    } else {
-      adminMobileBtn.classList.add('hidden');
-      adminMobileBtn.classList.remove('flex');
-    }
+    adminMobileBtn.classList.remove('hidden');
+    adminMobileBtn.classList.add('flex');
   }
 
   if (state.currentUser) {
@@ -3144,6 +3130,14 @@ function renderMentorApp() {
   // Render mentor's booking requests
   const list = document.getElementById('mentor-bookings-list');
   if (list) {
+    if (!state.bookings || state.bookings.length === 0) {
+      list.innerHTML = `
+        <div class="p-8 text-center bg-white rounded-3xl border border-purple-100 text-slate-400 text-xs font-bold">
+          لا توجد حجوزات أو طلبات جلسات حالياً.
+        </div>
+      `;
+      return;
+    }
     list.innerHTML = state.bookings.map(b => `
       <div class="p-4 rounded-2xl bg-white border border-purple-100 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-3">
         <div>
@@ -3159,7 +3153,7 @@ function renderMentorApp() {
           </div>
         </div>
 
-        <button onclick="window.phiApp.openMentorRoom('${b.mentorId || 'mentor-1'}', ${JSON.stringify(b).replace(/"/g, '&quot;')})" class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#EC4899] text-white font-bold text-xs shadow-md flex items-center justify-center gap-2 shrink-0">
+        <button onclick="window.phiApp.openMentorRoom('${b.mentorId || ''}', ${JSON.stringify(b).replace(/"/g, '&quot;')})" class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#EC4899] text-white font-bold text-xs shadow-md flex items-center justify-center gap-2 shrink-0">
           <i data-lucide="video" class="w-4 h-4"></i>
           <span>دخول الغرفة مع الطالب</span>
         </button>
@@ -3313,6 +3307,15 @@ function renderCompanyApplications() {
   const container = document.getElementById('company-applications-list');
   if (!container) return;
 
+  if (!state.applications || state.applications.length === 0) {
+    container.innerHTML = `
+      <div class="p-8 text-center bg-white rounded-2xl border border-purple-100 text-slate-400 text-xs font-bold">
+        لا توجد طلبات تقدم حالياً.
+      </div>
+    `;
+    return;
+  }
+
   container.innerHTML = state.applications.map(a => `
     <div class="p-4 rounded-2xl bg-white border border-purple-100 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 mb-3">
       <div class="flex items-center gap-3">
@@ -3345,6 +3348,15 @@ function renderCompanyApplications() {
 function renderCompanyJobs() {
   const container = document.getElementById('company-posted-jobs-list');
   if (!container) return;
+
+  if (!state.jobs || state.jobs.length === 0) {
+    container.innerHTML = `
+      <div class="p-8 text-center bg-white rounded-2xl border border-purple-100 text-slate-400 text-xs font-bold">
+        لا توجد فرص توظيف مضافة حالياً.
+      </div>
+    `;
+    return;
+  }
 
   container.innerHTML = state.jobs.map(j => `
     <div class="p-4 rounded-2xl bg-white border border-purple-100 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2.5">
@@ -3873,12 +3885,12 @@ export function renderAdminApp() {
   const statChallenges = document.getElementById('admin-stat-challenges-count');
   const statJobs = document.getElementById('admin-stat-jobs-count');
 
-  const totalStudents = state.students ? state.students.length : 8;
-  const totalMentors = state.mentors ? state.mentors.length : 4;
-  const totalCompanies = (state.companies ? state.companies.length : 0) + (INITIAL_DATA.metrics ? INITIAL_DATA.metrics.companiesCount : 85);
-  const totalPortfolio = (portfolioState && portfolioState.items) ? portfolioState.items.length : 6;
-  const totalChallenges = state.challenges ? state.challenges.length : 6;
-  const totalJobs = state.jobs ? state.jobs.length : 3;
+  const totalStudents = state.students ? state.students.length : 0;
+  const totalMentors = state.mentors ? state.mentors.length : 0;
+  const totalCompanies = state.companies ? state.companies.length : 0;
+  const totalPortfolio = (portfolioState && portfolioState.items) ? portfolioState.items.length : 0;
+  const totalChallenges = state.challenges ? state.challenges.length : 0;
+  const totalJobs = state.jobs ? state.jobs.length : 0;
 
   if (statStudents) statStudents.innerText = `${totalStudents}`;
   if (statMentors) statMentors.innerText = `${totalMentors}`;
@@ -4935,24 +4947,7 @@ export function toggleFaqItem(id) {
 // STAR RATING & MENTOR REVIEW SYSTEM
 // -------------------------------------------------------------
 function getSeedReviewsForMentor(mentorId) {
-  if (mentorId === 'mentor-1') {
-    return [
-      { id: 'rev-11', mentorId: 'mentor-1', studentName: 'مريم حسام شريف', rating: 5, comment: 'شرح احترافي جداً في دافنشي وبريمير، وضحلي التلوين السينمائي بدقة عالية وأصلحلي أخطاء المونتاج.', date: '2026-10-25' },
-      { id: 'rev-12', mentorId: 'mentor-1', studentName: 'عمر مصطفى', rating: 5, comment: 'توجيه ممتاز جداً في المونتاج ونقد بورتفوليو التقارير الإخبارية بشكل عملي وسريع.', date: '2026-10-18' }
-    ];
-  } else if (mentorId === 'mentor-2') {
-    return [
-      { id: 'rev-21', mentorId: 'mentor-2', studentName: 'سلمى أحمد', rating: 5, comment: 'أستاذة سارة ساعدتني في صياغة عنوان التحقيق الاستقصائي وتوثيق المصادر الصحفية.', date: '2026-10-22' },
-      { id: 'rev-22', mentorId: 'mentor-2', studentName: 'زياد محمود', rating: 4, comment: 'جلسة مفيدة جداً في صحافة البيانات ومراجعة الأسلوب الصحفي.', date: '2026-10-15' }
-    ];
-  } else if (mentorId === 'mentor-3') {
-    return [
-      { id: 'rev-31', mentorId: 'mentor-3', studentName: 'كريم خالد', rating: 5, comment: 'مصور عبقري بكل ما تحمله الكلمة من معنى، شرح لي زوايا الإضاءة الدرامية واستخدام الكاميرات السينمائية.', date: '2026-10-24' }
-    ];
-  }
-  return [
-    { id: 'rev-41', mentorId: mentorId, studentName: 'نور الدين', rating: 5, comment: 'جلسة توجيه رائعة ومفيدة جداً، نصائح عملية مباشرة لسوق العمل وتجاوز المقابلات.', date: '2026-10-20' }
-  ];
+  return [];
 }
 
 export function openRatingModal(mentorId, bookingId = '') {
