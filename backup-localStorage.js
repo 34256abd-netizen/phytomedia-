@@ -146,7 +146,21 @@ export function safeSetItem(key, value) {
         localStorage.setItem(key, value);
         return true;
       } catch (retryErr) {
-        if (key === STORAGE_KEY_VERIFICATIONS || key === STORAGE_KEY_REPORTS || key === STORAGE_KEY_SUBMISSIONS) {
+        if (key === STORAGE_KEY_VERIFICATIONS) {
+          try {
+            const parsed = JSON.parse(value);
+            const minimal = Array.isArray(parsed)
+              ? parsed.map(v => ({
+                  ...v,
+                  idProof: v.idProof ? '[إثبات هوية مرفق]' : '',
+                  syndicateCard: v.syndicateCard ? '[كارنيه نقابة مرفق]' : '',
+                  commercialRegister: v.commercialRegister ? '[سجل تجاري مرفق]' : ''
+                }))
+              : [];
+            localStorage.setItem(key, JSON.stringify(minimal));
+            return true;
+          } catch (e2) {}
+        } else if (key === STORAGE_KEY_REPORTS || key === STORAGE_KEY_SUBMISSIONS) {
           try {
             localStorage.setItem(key, JSON.stringify([]));
             return true;

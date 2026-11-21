@@ -347,7 +347,21 @@ export function safeSetItem(key, value) {
         return true;
       } catch (retryErr) {
         // If still failing, drop base64 strings completely for these keys as a last resort
-        if (key === STORAGE_KEY_VERIFICATIONS || key === STORAGE_KEY_REPORTS || key === STORAGE_KEY_SUBMISSIONS) {
+        if (key === STORAGE_KEY_VERIFICATIONS) {
+          try {
+            const parsed = JSON.parse(value);
+            const minimal = Array.isArray(parsed)
+              ? parsed.map(v => ({
+                  ...v,
+                  idProof: v.idProof ? '[إثبات هوية مرفق]' : '',
+                  syndicateCard: v.syndicateCard ? '[كارنيه نقابة مرفق]' : '',
+                  commercialRegister: v.commercialRegister ? '[سجل تجاري مرفق]' : ''
+                }))
+              : [];
+            localStorage.setItem(key, JSON.stringify(minimal));
+            return true;
+          } catch (e2) {}
+        } else if (key === STORAGE_KEY_REPORTS || key === STORAGE_KEY_SUBMISSIONS) {
           try {
             localStorage.setItem(key, JSON.stringify([])); // Reset to empty if absolutely necessary
             return true;
@@ -954,16 +968,22 @@ export function submitRoleSignup() {
 
     const instapayQr = state.uploadedMentorInstapayQr || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(instapayHandle)}`;
 
+    const mentorEmail = document.getElementById('reg-email')?.value?.trim() || '';
     const mentorId = `mentor-${Date.now()}`;
+    const joinedDate = new Date().toLocaleDateString('ar-EG');
     state.currentUser = {
       id: mentorId,
       role: 'mentor',
       name,
+      email: mentorEmail,
       specialty,
       yearsExp,
       price,
       workplace,
       link,
+      portfolioLink: link,
+      idProof: state.uploadedMentorIdProof || '',
+      syndicateCard: state.uploadedMentorCard || '',
       earnings: 0,
       status: 'pending_verification',
       verificationStatus: 'pending_verification',
@@ -979,18 +999,23 @@ export function submitRoleSignup() {
       bank_holder: bankHolder,
       fawry_phone: fawryPhone,
       accepted_methods: acceptedMethods,
-      joinedAt: new Date().toLocaleDateString('ar-EG')
+      joinedAt: joinedDate
     };
 
-    // Add to mentors array with pending status
+    // Add to mentors array (single source of truth)
     const newMentor = {
       id: mentorId,
       name,
       fullName: name,
+      email: mentorEmail,
       specialty,
       experience: `${workplace} (${yearsExp} سنوات خبرة)`,
       yearsExp,
       workplace,
+      link,
+      portfolioLink: link,
+      idProof: state.uploadedMentorIdProof || '',
+      syndicateCard: state.uploadedMentorCard || '',
       rating: '5.0',
       price,
       badge: specialty.slice(0, 10),
@@ -1012,33 +1037,36 @@ export function submitRoleSignup() {
       bank_iban: bankIban,
       bank_holder: bankHolder,
       fawry_phone: fawryPhone,
-      accepted_methods: acceptedMethods
+      accepted_methods: acceptedMethods,
+      joinedAt: joinedDate
     };
     state.mentors.unshift(newMentor);
 
-    // Add to verifications table for Admin Approval
+    // Add to verifications table synced with state.mentors
     state.verifications.unshift({
       id: `verif-${Date.now()}`,
       userId: mentorId,
       name: name,
       role: 'mentor',
       specialty: specialty,
-      email: 'mentor@work.eg',
+      email: mentorEmail,
       workplace: workplace,
       portfolioLink: link,
       payoutMethod,
       instapayHandle,
       walletPhone,
-      idProof: state.uploadedMentorIdProof,
+      idProof: state.uploadedMentorIdProof || '',
       syndicateCard: state.uploadedMentorCard || '',
-      date: new Date().toLocaleDateString('ar-EG'),
+      date: joinedDate,
       status: 'pending'
     });
 
+    reconcileMentorsSource();
     saveToStorage();
     closeRoleSignup();
-    alert('⏳ تم تقديم طلب الانضمام كمنتور بنجاح!\n\nحسابك الآن (قيد التوثيق والمراجعة). تم تسجيل وتأمين بيانات استلام أرباحك بنجاح.');
+    alert('⏳ تم تقديم طلب الانضمام كمنتور بنجاح!\n\nتمت إضافتك لقائمة المنتورز وطلبات التوثيق في لوحة الإدارة.');
     navigateView('mentor-app');
+    renderMentorsList();
 
   } else if (role === 'company') {
     const type = document.getElementById('reg-company-type')?.value || 'شركة انتاج';
@@ -2769,51 +2797,265 @@ function renderBuilderPanes() {
   }
 }
 
+// -------------------------------------------------------------
+// UNIFIED MENTORS & VERIFICATIONS SINGLE SOURCE OF TRUTH
+// -------------------------------------------------------------
+export function getMentorMissingFields(mentor, verif) {
+  const m = mentor || {};
+  const v = verif || {};
+  const missing = [];
+  if (!(m.fullName || m.name || '').trim()) missing.push('الاسم المهني');
+  if (!(m.specialty || v.specialty || '').trim()) missing.push('التخصص الدقيق');
+  if (!(m.email || v.email || '').trim()) missing.push('البريد الإلكتروني');
+  if (!(m.workplace || v.workplace || m.experience || '').trim()) missing.push('جهة العمل / الخبرة');
+  if (!(m.portfolioLink || m.link || v.portfolioLink || '').trim()) missing.push('رابط الأعمال / البورتفوليو');
+  if (!m.price || Number(m.price) <= 0) missing.push('سعر الجلسة');
+  if (!(m.idProof || v.idProof || '').trim()) missing.push('صورة إثبات الهوية');
+  const hasPayout = !!(m.payoutMethod || v.payoutMethod || m.instapay_link || m.wallet_phone || m.bank_iban || m.fawry_phone);
+  if (!hasPayout) missing.push('وسيلة استلام الأرباح');
+  return missing;
+}
+
+export function reconcileMentorsSource() {
+  if (!Array.isArray(state.mentors)) state.mentors = [];
+  if (!Array.isArray(state.verifications)) state.verifications = [];
+
+  // 1. Ensure currently logged-in mentor exists in state.mentors
+  if (state.currentUser && state.currentUser.role === 'mentor') {
+    const cu = state.currentUser;
+    const cuId = cu.id || `mentor-current`;
+    const exists = state.mentors.find(m => m.id === cuId || (cu.name && (m.name === cu.name || m.fullName === cu.name)));
+    if (!exists) {
+      state.mentors.unshift({
+        id: cuId,
+        name: cu.name || 'خبير إعلامي',
+        fullName: cu.name || 'خبير إعلامي',
+        email: cu.email || '',
+        specialty: cu.specialty || '',
+        experience: cu.workplace ? `${cu.workplace} (${cu.yearsExp || 1} سنوات خبرة)` : (cu.experience || ''),
+        yearsExp: cu.yearsExp || '',
+        workplace: cu.workplace || '',
+        link: cu.link || cu.portfolioLink || '',
+        portfolioLink: cu.portfolioLink || cu.link || '',
+        idProof: cu.idProof || '',
+        syndicateCard: cu.syndicateCard || '',
+        rating: '5.0',
+        price: cu.price || 0,
+        badge: (cu.specialty || 'خبير').slice(0, 10),
+        status: cu.status || 'pending_verification',
+        verificationStatus: cu.verificationStatus || cu.status || 'pending_verification',
+        isVerified: Boolean(cu.isVerified),
+        image: cu.image || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80',
+        bio: cu.specialty ? `خبير في ${cu.specialty}` : '',
+        sessionsCount: 0,
+        meetLink: 'https://meet.google.com/phi-mentor-direct',
+        earnings: cu.earnings || 0,
+        payoutMethod: cu.payoutMethod || '',
+        instapay_link: cu.instapay_link || '',
+        instapay_phone: cu.instapay_phone || '',
+        instapay_qr_image: cu.instapay_qr_image || '',
+        wallet_phone: cu.wallet_phone || '',
+        wallet_provider: cu.wallet_provider || '',
+        bank_name: cu.bank_name || '',
+        bank_iban: cu.bank_iban || '',
+        bank_holder: cu.bank_holder || '',
+        fawry_phone: cu.fawry_phone || '',
+        accepted_methods: cu.accepted_methods || [],
+        joinedAt: cu.joinedAt || new Date().toLocaleDateString('ar-EG')
+      });
+    }
+  }
+
+  // 2. If any mentor verification exists without a matching mentor in state.mentors, recreate it in state.mentors
+  state.verifications.forEach(v => {
+    if (v && v.role === 'mentor') {
+      const mExists = state.mentors.find(m => m.id === v.userId || (v.name && (m.name === v.name || m.fullName === v.name)));
+      if (!mExists) {
+        const isVer = v.status === 'verified';
+        const isRej = v.status === 'rejected';
+        state.mentors.unshift({
+          id: v.userId || `mentor-${Date.now()}`,
+          name: v.name || 'خبير إعلامي',
+          fullName: v.name || 'خبير إعلامي',
+          email: v.email || '',
+          specialty: v.specialty || '',
+          experience: v.workplace || '',
+          workplace: v.workplace || '',
+          link: v.portfolioLink || '',
+          portfolioLink: v.portfolioLink || '',
+          idProof: v.idProof || '',
+          syndicateCard: v.syndicateCard || '',
+          rating: '5.0',
+          price: v.price || 0,
+          badge: (v.specialty || 'خبير').slice(0, 10),
+          status: isVer ? 'verified' : (isRej ? 'rejected' : 'pending_verification'),
+          verificationStatus: isVer ? 'verified' : (isRej ? 'rejected' : 'pending_verification'),
+          isVerified: isVer,
+          image: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80',
+          bio: v.specialty ? `خبير في ${v.specialty}` : '',
+          sessionsCount: 0,
+          earnings: 0,
+          payoutMethod: v.payoutMethod || '',
+          instapay_link: v.instapayHandle || '',
+          wallet_phone: v.walletPhone || '',
+          joinedAt: v.date || new Date().toLocaleDateString('ar-EG')
+        });
+      }
+    }
+  });
+
+  // 3. Deduplicate mentors by id and merge missing fields from verifications
+  const seenIds = new Set();
+  state.mentors = state.mentors.filter(m => {
+    if (!m) return false;
+    const key = m.id || `${m.name}-${m.specialty}`;
+    if (seenIds.has(key)) return false;
+    seenIds.add(key);
+    return true;
+  });
+
+  // 4. Keep state.verifications 100% synced with state.mentors
+  state.mentors.forEach(m => {
+    const matchedVerif = state.verifications.find(v => v.role === 'mentor' && v.userId === m.id);
+    if (matchedVerif) {
+      if (!m.idProof && matchedVerif.idProof) m.idProof = matchedVerif.idProof;
+      if (!m.syndicateCard && matchedVerif.syndicateCard) m.syndicateCard = matchedVerif.syndicateCard;
+      if (!m.portfolioLink && matchedVerif.portfolioLink) m.portfolioLink = matchedVerif.portfolioLink;
+      if (!m.email && matchedVerif.email) m.email = matchedVerif.email;
+      // Sync verification status from mentor source
+      if (m.isVerified || m.status === 'verified' || m.verificationStatus === 'verified') {
+        matchedVerif.status = 'verified';
+      } else if (m.status === 'rejected' || m.verificationStatus === 'rejected') {
+        matchedVerif.status = 'rejected';
+      }
+    } else if (!m.isVerified && m.status !== 'verified' && m.status !== 'rejected' && m.status !== 'frozen') {
+      state.verifications.unshift({
+        id: `verif-mentor-${m.id}`,
+        userId: m.id,
+        name: m.fullName || m.name || 'خبير إعلامي',
+        role: 'mentor',
+        specialty: m.specialty || '',
+        email: m.email || '',
+        workplace: m.workplace || m.experience || '',
+        portfolioLink: m.portfolioLink || m.link || '',
+        payoutMethod: m.payoutMethod || '',
+        instapayHandle: m.instapay_link || '',
+        walletPhone: m.wallet_phone || '',
+        idProof: m.idProof || '',
+        syndicateCard: m.syndicateCard || '',
+        date: m.joinedAt || new Date().toLocaleDateString('ar-EG'),
+        status: 'pending'
+      });
+    }
+  });
+
+  return state.mentors;
+}
+
+export function getPendingVerificationsList() {
+  reconcileMentorsSource();
+  const seenUserIds = new Set();
+  const pending = [];
+
+  // Pending mentors always derived directly from state.mentors (single source of truth)
+  state.mentors.forEach(m => {
+    const isVerified = m.isVerified || m.status === 'verified' || m.verificationStatus === 'verified';
+    const isClosed = m.status === 'rejected' || m.verificationStatus === 'rejected' || m.status === 'frozen';
+    if (!isVerified && !isClosed) {
+      const existingVerif = state.verifications.find(v => v.role === 'mentor' && v.userId === m.id);
+      seenUserIds.add(m.id);
+      pending.push({
+        id: existingVerif ? existingVerif.id : `verif-mentor-${m.id}`,
+        userId: m.id,
+        name: m.fullName || m.name || 'خبير إعلامي',
+        role: 'mentor',
+        specialty: m.specialty || '',
+        email: m.email || (existingVerif ? existingVerif.email : '') || '',
+        workplace: m.workplace || m.experience || '',
+        portfolioLink: m.portfolioLink || m.link || (existingVerif ? existingVerif.portfolioLink : '') || '',
+        idProof: m.idProof || (existingVerif ? existingVerif.idProof : '') || '',
+        syndicateCard: m.syndicateCard || (existingVerif ? existingVerif.syndicateCard : '') || '',
+        date: (existingVerif && existingVerif.date) || m.joinedAt || new Date().toLocaleDateString('ar-EG'),
+        status: 'pending',
+        missingFields: getMentorMissingFields(m, existingVerif)
+      });
+    }
+  });
+
+  // Other pending verifications (companies, students, etc.)
+  state.verifications.forEach(v => {
+    if (v && v.role !== 'mentor' && v.status === 'pending' && !seenUserIds.has(v.userId || v.id)) {
+      seenUserIds.add(v.userId || v.id);
+      pending.push(v);
+    }
+  });
+
+  return pending;
+}
+
 function renderMentorsList() {
   const container = document.getElementById('mentors-grid-student');
   if (!container) return;
 
-  // Filter: ONLY verified mentors appear! (Status must be 'verified' or isVerified === true, and NOT 'frozen' or 'pending_verification')
-  const visibleMentors = state.mentors.filter(m => 
-    (m.status === 'verified' || m.verificationStatus === 'verified' || m.isVerified) &&
+  const allMentors = reconcileMentorsSource();
+
+  // Show ALL registered mentors immediately (excluding only frozen or rejected)
+  const visibleMentors = allMentors.filter(m =>
     m.status !== 'frozen' &&
-    m.verificationStatus !== 'pending_verification'
+    m.status !== 'rejected' &&
+    m.verificationStatus !== 'rejected'
   );
 
   if (visibleMentors.length === 0) {
     container.innerHTML = `
       <div class="col-span-full p-8 text-center bg-white rounded-3xl border border-purple-100">
-        <p class="text-slate-500 font-bold">لا يوجد خبراء معتمدون حالياً. جميع الخبراء الجدد يخضعون لتوثيق الهوية قبل الظهور.</p>
+        <p class="text-slate-500 font-bold">لا يوجد خبراء مسجلون حالياً في المنصة.</p>
       </div>
     `;
     return;
   }
 
-  container.innerHTML = visibleMentors.map(m => `
+  container.innerHTML = visibleMentors.map(m => {
+    const isVerified = m.status === 'verified' || m.verificationStatus === 'verified' || m.isVerified === true;
+    const mentorAvatar = m.image || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80';
+    const mentorDisplayName = m.fullName || m.name || 'خبير إعلامي';
+    const mentorSpecialty = m.specialty || 'استشارات إعلامية';
+    const mentorExp = m.experience || m.workplace || 'خبرة إعلامية متخصصة';
+    const mentorBio = m.bio || `خبير في ${mentorSpecialty}.`;
+    const mentorPrice = m.price || 200;
+
+    return `
     <div class="bg-white rounded-3xl p-6 border border-purple-100 shadow-sm hover:shadow-xl hover:border-purple-300 transition-all flex flex-col justify-between group">
       <div>
         <!-- Top row: Avatar, status badge, verified badge and specialized badge -->
         <div class="flex items-start justify-between gap-4 mb-4">
           <div class="relative w-16 h-16 rounded-2xl overflow-hidden shrink-0 border-2 border-purple-200">
-            <img src="${m.image}" alt="${m.name}" class="w-full h-full object-cover">
+            <img src="${mentorAvatar}" alt="${mentorDisplayName}" class="w-full h-full object-cover">
           </div>
           <div class="flex flex-col items-end gap-1.5">
-            <span class="text-[11px] font-black px-2.5 py-0.5 rounded-full bg-purple-100 text-[#7C3AED] border border-purple-300 flex items-center gap-1 shadow-sm">
-              <i data-lucide="badge-check" class="w-3.5 h-3.5 text-[#7C3AED]"></i>
-              <span>موثق ✓</span>
-            </span>
+            ${isVerified ? `
+              <span class="text-[11px] font-black px-2.5 py-0.5 rounded-full bg-purple-100 text-[#7C3AED] border border-purple-300 flex items-center gap-1 shadow-sm">
+                <i data-lucide="badge-check" class="w-3.5 h-3.5 text-[#7C3AED]"></i>
+                <span>موثق ✓</span>
+              </span>
+            ` : `
+              <span class="text-[11px] font-black px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-1 shadow-sm">
+                <i data-lucide="clock" class="w-3.5 h-3.5 text-amber-600"></i>
+                <span>قيد التوثيق ⏳</span>
+              </span>
+            `}
             <span class="text-[11px] font-black text-white bg-gradient-to-r from-[#7C3AED] to-[#EC4899] px-2.5 py-0.5 rounded-lg shadow-sm">
-              ${m.badge || m.specialty}
+              ${m.badge || mentorSpecialty}
             </span>
           </div>
         </div>
 
         <h4 class="text-lg font-black text-[#1E1B4B] group-hover:text-[#7C3AED] transition-colors flex items-center gap-1.5">
-          <span>${m.fullName || m.name}</span>
+          <span>${mentorDisplayName}</span>
         </h4>
-        <div class="text-xs font-bold text-[#7C3AED] mt-0.5 mb-1">تخصص: ${m.specialty}</div>
-        <p class="text-xs text-slate-500 font-medium mb-3">خبرة: ${m.experience}</p>
-        <p class="text-xs text-slate-600 line-clamp-2 leading-relaxed mb-4">${m.bio}</p>
+        <div class="text-xs font-bold text-[#7C3AED] mt-0.5 mb-1">تخصص: ${mentorSpecialty}</div>
+        <p class="text-xs text-slate-500 font-medium mb-3">خبرة: ${mentorExp}</p>
+        <p class="text-xs text-slate-600 line-clamp-2 leading-relaxed mb-4">${mentorBio}</p>
 
         <!-- Stats row: rating, price, and reviews link -->
         <div class="flex items-center justify-between p-3 rounded-2xl bg-purple-50/70 border border-purple-100 text-xs mb-4">
@@ -2821,11 +3063,11 @@ function renderMentorsList() {
             <span>★</span>
             <span>${m.rating || '5.0'}</span>
             <button onclick="window.phiApp.openMentorReviewsModal('${m.id}')" class="text-slate-500 hover:text-[#7C3AED] font-normal underline cursor-pointer text-[11px] mr-1">
-              (${Array.isArray(m.reviewsList) ? m.reviewsList.length : (m.sessionsCount || 12)} تقييماً)
+              (${Array.isArray(m.reviewsList) ? m.reviewsList.length : (m.sessionsCount || 0)} تقييماً)
             </button>
           </div>
           <div class="font-mono font-black text-[#1E1B4B]">
-            <span>${m.price}</span>
+            <span>${mentorPrice}</span>
             <span class="text-xs text-slate-500 font-normal">ج.م / سيشن</span>
           </div>
         </div>
@@ -2843,12 +3085,13 @@ function renderMentorsList() {
           <div id="react-instapay-${m.id}" class="no-print"></div>
         </div>
 
-        <button onclick="window.phiApp.openReportModal('${m.id}', '${m.fullName || m.name}', 'mentor')" class="w-full py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 font-bold text-[11px] flex items-center justify-center gap-1.5 transition-all cursor-pointer">
+        <button onclick="window.phiApp.openReportModal('${m.id}', '${mentorDisplayName}', 'mentor')" class="w-full py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 font-bold text-[11px] flex items-center justify-center gap-1.5 transition-all cursor-pointer">
           <span>🚩 إبلاغ عن نصب / حساب وهمي</span>
         </button>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   // Mount React ExpertInstaPay components
   visibleMentors.forEach(m => {
@@ -2858,7 +3101,7 @@ function renderMentorsList() {
         window.phiApp.mountReactComponent('ExpertInstaPay', slotId, {
           expert: {
             ...m,
-            instapay_link: m.instapay_link || `${m.name.toLowerCase().replace(/\s+/g, '')}@instapay`,
+            instapay_link: m.instapay_link || `${(m.name || m.fullName || 'mentor').toLowerCase().replace(/\s+/g, '')}@instapay`,
             instapay_qr_image: m.instapay_qr_image || (m.instapay_link ? `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${m.instapay_link}` : '')
           }
         });
@@ -3851,7 +4094,7 @@ export function copyAdminDashboardLink() {
 
 export function setAdminSubTab(tabName) {
   state.adminSubTab = tabName;
-  const tabs = ['overview', 'students', 'portfolio', 'challenges', 'company-requests', 'verifications', 'reports'];
+  const tabs = ['overview', 'students', 'mentors', 'portfolio', 'challenges', 'company-requests', 'verifications', 'reports'];
 
   tabs.forEach(t => {
     const btn = document.getElementById(`admin-tab-btn-${t}`);
@@ -3877,16 +4120,23 @@ export function setAdminSubTab(tabName) {
 }
 
 export function renderAdminApp() {
-  // Update 6 Live Statistics KPI Cards
+  const allMentors = reconcileMentorsSource();
+  const pendingVerifsList = getPendingVerificationsList();
+
+  // Update 6 Live Statistics KPI Cards (same single source of truth as lists)
   const statStudents = document.getElementById('admin-stat-students-count');
   const statMentors = document.getElementById('admin-stat-mentors-count');
+  const statMentorsSub = document.getElementById('admin-stat-mentors-sublabel');
+  const badgeMentors = document.getElementById('admin-badge-mentors-count');
   const statCompanies = document.getElementById('admin-stat-companies-count');
   const statPortfolio = document.getElementById('admin-stat-portfolio-count');
   const statChallenges = document.getElementById('admin-stat-challenges-count');
   const statJobs = document.getElementById('admin-stat-jobs-count');
 
   const totalStudents = state.students ? state.students.length : 0;
-  const totalMentors = state.mentors ? state.mentors.length : 0;
+  const totalMentors = allMentors.length;
+  const verifiedMentors = allMentors.filter(m => m.isVerified || m.status === 'verified' || m.verificationStatus === 'verified').length;
+  const pendingMentors = allMentors.filter(m => !m.isVerified && m.status !== 'verified' && m.status !== 'frozen' && m.status !== 'rejected').length;
   const totalCompanies = state.companies ? state.companies.length : 0;
   const totalPortfolio = (portfolioState && portfolioState.items) ? portfolioState.items.length : 0;
   const totalChallenges = state.challenges ? state.challenges.length : 0;
@@ -3894,14 +4144,20 @@ export function renderAdminApp() {
 
   if (statStudents) statStudents.innerText = `${totalStudents}`;
   if (statMentors) statMentors.innerText = `${totalMentors}`;
+  if (badgeMentors) badgeMentors.innerText = `${totalMentors}`;
+  if (statMentorsSub) {
+    statMentorsSub.innerText = totalMentors > 0
+      ? `موثق: ${verifiedMentors} • قيد التوثيق: ${pendingMentors} • اضغط للفتح ↗`
+      : 'خبير إعلامي • اضغط للفتح ↗';
+  }
   if (statCompanies) statCompanies.innerText = `${totalCompanies}`;
   if (statPortfolio) statPortfolio.innerText = `${totalPortfolio}`;
   if (statChallenges) statChallenges.innerText = `${totalChallenges}`;
   if (statJobs) statJobs.innerText = `${totalJobs}`;
 
-  // Update Pending badges
+  // Update Pending badges from the EXACT same source as the lists
   const pendingReportsCount = state.reports ? state.reports.filter(r => r.status === 'pending').length : 0;
-  const pendingVerifsCount = state.verifications ? state.verifications.filter(v => v.status === 'pending').length : 0;
+  const pendingVerifsCount = pendingVerifsList.length;
   
   const badgeReports = document.getElementById('admin-badge-pending-reports');
   const badgeVerifs = document.getElementById('stat-pending-verifications-count');
@@ -3923,6 +4179,8 @@ export function renderAdminApp() {
   const activeTab = state.adminSubTab || 'overview';
   if (activeTab === 'students') {
     renderAdminStudentsTable();
+  } else if (activeTab === 'mentors') {
+    renderAdminMentorsTable();
   } else if (activeTab === 'portfolio') {
     renderAdminPortfolioTable();
   } else if (activeTab === 'challenges') {
@@ -4190,6 +4448,213 @@ export function submitAdminNewStudent(e) {
   renderAdminApp();
 
   alert(`✓ تمت إضافة الطالب (${name}) بنجاح وتفعيله في قاعدة بيانات المواهب! 🎓`);
+}
+
+// -------------------------------------------------------------
+// TAB 2B: MENTORS MANAGEMENT TABLE (قائمة الخبراء والمنتورز الموحدة)
+// -------------------------------------------------------------
+export function renderAdminMentorsTable() {
+  const tbody = document.getElementById('admin-mentors-table-body');
+  if (!tbody) return;
+
+  const allMentors = reconcileMentorsSource();
+  const searchQuery = (document.getElementById('admin-mentors-search')?.value || '').trim().toLowerCase();
+  const statusFilter = document.getElementById('admin-mentors-status-filter')?.value || 'all';
+
+  let list = allMentors.map(m => {
+    const verif = state.verifications.find(v => v.role === 'mentor' && v.userId === m.id);
+    const missingFields = getMentorMissingFields(m, verif);
+    const isVerified = m.isVerified || m.status === 'verified' || m.verificationStatus === 'verified';
+    const isFrozen = m.status === 'frozen';
+    const isRejected = m.status === 'rejected' || m.verificationStatus === 'rejected';
+    return { m, verif, missingFields, isVerified, isFrozen, isRejected };
+  });
+
+  if (searchQuery) {
+    list = list.filter(({ m, verif }) =>
+      ((m.fullName || m.name || '').toLowerCase().includes(searchQuery)) ||
+      ((m.specialty || '').toLowerCase().includes(searchQuery)) ||
+      ((m.workplace || m.experience || '').toLowerCase().includes(searchQuery)) ||
+      ((m.email || verif?.email || '').toLowerCase().includes(searchQuery))
+    );
+  }
+
+  if (statusFilter !== 'all') {
+    list = list.filter(({ missingFields, isVerified, isFrozen, isRejected }) => {
+      if (statusFilter === 'verified') return isVerified && !isFrozen && !isRejected;
+      if (statusFilter === 'pending') return !isVerified && !isFrozen && !isRejected;
+      if (statusFilter === 'incomplete') return missingFields.length > 0;
+      if (statusFilter === 'frozen') return isFrozen || isRejected;
+      return true;
+    });
+  }
+
+  if (list.length === 0) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="6" class="p-8 text-center text-slate-400 font-bold bg-purple-50/20">
+          لا يوجد خبراء مسجلون مطابقون لمعايير البحث الحالية.
+        </td>
+      </tr>
+    `;
+    return;
+  }
+
+  tbody.innerHTML = list.map(({ m, verif, missingFields, isVerified, isFrozen, isRejected }) => {
+    const displayName = m.fullName || m.name || 'خبير بدون اسم';
+    const displayEmail = m.email || verif?.email || '';
+    const avatar = m.image || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80';
+    const portfolioUrl = m.portfolioLink || m.link || verif?.portfolioLink || '';
+    const idProofDoc = m.idProof || verif?.idProof || '';
+
+    let statusBadge = '';
+    if (isFrozen) {
+      statusBadge = `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-rose-100 text-rose-700 border border-rose-200">مجمد ⚠️</span>`;
+    } else if (isRejected) {
+      statusBadge = `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-slate-200 text-slate-700 border border-slate-300">مرفوض ✕</span>`;
+    } else if (isVerified) {
+      statusBadge = `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-emerald-100 text-emerald-800 border border-emerald-200">معتمد وموثق ✓</span>`;
+    } else {
+      statusBadge = `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-amber-100 text-amber-800 border border-amber-200">قيد التوثيق ⏳</span>`;
+    }
+
+    return `
+      <tr class="border-b border-purple-50 hover:bg-purple-50/40 transition-colors">
+        <td class="p-4">
+          <div class="flex items-center gap-3">
+            <img src="${avatar}" alt="${displayName}" class="w-10 h-10 rounded-2xl object-cover border border-purple-200 shrink-0">
+            <div>
+              <div class="font-black text-[#1E1B4B] text-sm">${displayName}</div>
+              <div class="text-[11px] font-mono ${displayEmail ? 'text-[#7C3AED]' : 'text-rose-600 font-bold'}">
+                ${displayEmail || '⚠️ بدون بريد إلكتروني'}
+              </div>
+              <div class="text-[10px] text-slate-400 font-mono">${m.joinedAt || verif?.date || ''}</div>
+            </div>
+          </div>
+        </td>
+
+        <td class="p-4">
+          <div class="font-bold text-slate-800">${m.specialty || '<span class="text-rose-600">التخصص غير محدد</span>'}</div>
+          <div class="text-[11px] text-slate-500">${m.workplace || m.experience || '<span class="text-rose-500">جهة العمل غير محددة</span>'}</div>
+        </td>
+
+        <td class="p-4 max-w-xs">
+          ${missingFields.length > 0 ? `
+            <div class="p-2.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-[11px] space-y-1">
+              <div class="font-black flex items-center gap-1">
+                <span>⚠️ الملف ناقص (${missingFields.length}):</span>
+              </div>
+              <div class="font-medium leading-relaxed">${missingFields.join(' • ')}</div>
+            </div>
+          ` : `
+            <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold">
+              ✓ جميع البيانات مكتملة
+            </span>
+          `}
+          <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
+            ${portfolioUrl ? `<a href="${portfolioUrl}" target="_blank" class="text-[10px] font-bold text-[#7C3AED] hover:underline font-mono">🔗 رابط الأعمال</a>` : ''}
+            ${idProofDoc ? `<button onclick="window.phiApp.openImagePreviewModal('إثبات الهوية - ${displayName}', '${idProofDoc}')" class="text-[10px] font-bold text-pink-600 hover:underline cursor-pointer">🪪 فحص الهوية</button>` : ''}
+          </div>
+        </td>
+
+        <td class="p-4 text-center font-mono font-black text-[#1E1B4B]">
+          ${m.price ? `${m.price} ج.م` : '<span class="text-rose-600 text-[11px]">غير محدد</span>'}
+        </td>
+
+        <td class="p-4 text-center">
+          ${statusBadge}
+        </td>
+
+        <td class="p-4 text-center">
+          <div class="flex flex-wrap items-center justify-center gap-1.5">
+            ${(!isVerified || isRejected) ? `
+              <button onclick="window.phiApp.approveMentorDirectly('${m.id}')" class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm cursor-pointer">
+                اعتماد وتوثيق ✓
+              </button>
+            ` : ''}
+            <button onclick="window.phiApp.toggleMentorStatus('${m.id}')" class="px-3 py-1.5 rounded-xl font-bold text-xs transition-all cursor-pointer ${isFrozen ? 'bg-purple-600 hover:bg-purple-700 text-white' : 'bg-amber-100 hover:bg-amber-200 text-amber-800'}">
+              ${isFrozen ? 'فك التجميد ✓' : 'تجميد ⚠️'}
+            </button>
+            <button onclick="window.phiApp.deleteAdminMentor('${m.id}')" title="حذف الخبير نهائياً" class="p-1.5 rounded-xl bg-slate-100 hover:bg-rose-100 text-slate-500 hover:text-rose-700 transition-colors cursor-pointer">
+              <i data-lucide="trash-2" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+export function filterAdminMentors() {
+  renderAdminMentorsTable();
+  window.lucide && window.lucide.createIcons();
+}
+
+export function approveMentorDirectly(mentorId) {
+  reconcileMentorsSource();
+  const mentor = state.mentors.find(m => m.id === mentorId);
+  if (!mentor) return;
+
+  mentor.status = 'verified';
+  mentor.verificationStatus = 'verified';
+  mentor.isVerified = true;
+
+  const verif = state.verifications.find(v => v.role === 'mentor' && v.userId === mentorId);
+  if (verif) {
+    verif.status = 'verified';
+  }
+
+  if (state.currentUser && state.currentUser.id === mentorId) {
+    state.currentUser.status = 'active';
+    state.currentUser.verificationStatus = 'verified';
+    state.currentUser.isVerified = true;
+  }
+
+  saveToStorage();
+  renderAdminApp();
+  renderAdminMentorsTable();
+  renderAdminProtectionTab();
+  renderMentorsList();
+  alert(`✓ تم اعتماد وتوثيق الخبير (${mentor.fullName || mentor.name}) بنجاح!`);
+}
+
+export function toggleMentorStatus(mentorId) {
+  const mentor = state.mentors.find(m => m.id === mentorId);
+  if (!mentor) return;
+
+  const willBeFrozen = mentor.status !== 'frozen';
+  mentor.status = willBeFrozen ? 'frozen' : (mentor.isVerified ? 'verified' : 'pending_verification');
+
+  if (state.currentUser && state.currentUser.id === mentorId) {
+    state.currentUser.status = willBeFrozen ? 'frozen' : 'active';
+  }
+
+  saveToStorage();
+  renderAdminApp();
+  renderAdminMentorsTable();
+  renderMentorsList();
+
+  alert(willBeFrozen
+    ? `⚠️ تم تجميد حساب الخبير (${mentor.fullName || mentor.name}) وإخفاؤه مؤقتاً من قائمة الطلاب.`
+    : `✓ تم فك التجميد وإعادة الخبير (${mentor.fullName || mentor.name}) بنجاح.`
+  );
+}
+
+export function deleteAdminMentor(mentorId) {
+  const mentor = state.mentors.find(m => m.id === mentorId);
+  if (!mentor) return;
+  const mentorName = mentor.fullName || mentor.name || 'الخبير';
+
+  state.mentors = state.mentors.filter(m => m.id !== mentorId);
+  state.verifications = state.verifications.filter(v => !(v.role === 'mentor' && v.userId === mentorId));
+  saveToStorage();
+
+  renderAdminApp();
+  renderAdminMentorsTable();
+  renderAdminProtectionTab();
+  renderMentorsList();
+
+  alert(`🗑️ تم حذف حساب الخبير (${mentorName}) نهائياً من المنظومة.`);
 }
 
 // -------------------------------------------------------------
@@ -4563,8 +5028,8 @@ export function renderAdminCompanyRequestsTable() {
 // ADMIN PROTECTION TAB (REPORTS, VERIFICATIONS, BLACKLIST)
 // -------------------------------------------------------------
 export function renderAdminProtectionTab() {
-  // Stat counters
-  const pendingVerifsCount = state.verifications.filter(v => v.status === 'pending').length;
+  const pendingList = getPendingVerificationsList();
+  const pendingVerifsCount = pendingList.length;
   const totalReportsCount = state.reports.length;
   const blacklistCount = state.blacklistIps.length;
 
@@ -4589,7 +5054,10 @@ export function renderAdminVerifications() {
   const container = document.getElementById('admin-pending-verifications-list');
   if (!container) return;
 
-  const pendingList = state.verifications.filter(v => v.status === 'pending');
+  const pendingList = getPendingVerificationsList();
+  const statVerifs = document.getElementById('stat-pending-verifications-count');
+  if (statVerifs) statVerifs.innerText = pendingList.length.toString();
+
   if (pendingList.length === 0) {
     container.innerHTML = `
       <div class="p-8 text-center bg-purple-50/40 rounded-2xl border border-purple-100 text-slate-500">
@@ -4603,6 +5071,7 @@ export function renderAdminVerifications() {
 
   container.innerHTML = pendingList.map(v => {
     const isMentor = v.role === 'mentor';
+    const missingFields = Array.isArray(v.missingFields) ? v.missingFields : [];
     return `
       <div class="p-5 rounded-2xl bg-purple-50/50 border border-purple-200 flex flex-col md:flex-row md:items-center justify-between gap-5 transition-all">
         <div class="space-y-2">
@@ -4611,15 +5080,21 @@ export function renderAdminVerifications() {
               ${isMentor ? 'طلب توثيق خبير إعلامي 🧠' : 'طلب توثيق مؤسسة / قناة 🏢'}
             </span>
             <h5 class="text-base font-black text-[#1E1B4B]">${v.name}</h5>
-            <span class="text-[11px] font-mono text-slate-400">${v.date}</span>
+            <span class="text-[11px] font-mono text-slate-400">${v.date || ''}</span>
           </div>
 
           <div class="text-xs text-slate-600 space-y-1">
-            <p><span class="font-bold text-[#1E1B4B]">الجهة / التخصص:</span> ${v.specialty || v.companyType || ''} • ${v.workplace || ''}</p>
-            <p><span class="font-bold text-[#1E1B4B]">البريد:</span> <span class="font-mono text-[#7C3AED]">${v.email}</span></p>
+            <p><span class="font-bold text-[#1E1B4B]">الجهة / التخصص:</span> ${v.specialty || v.companyType || '<span class="text-rose-600">غير محدد</span>'} • ${v.workplace || '<span class="text-rose-500">جهة العمل غير محددة</span>'}</p>
+            <p><span class="font-bold text-[#1E1B4B]">البريد:</span> <span class="font-mono ${v.email ? 'text-[#7C3AED]' : 'text-rose-600 font-bold'}">${v.email || '⚠️ بدون بريد إلكتروني'}</span></p>
             ${v.portfolioLink ? `<p><span class="font-bold text-[#1E1B4B]">رابط الأعمال الحقيقي:</span> <a href="${v.portfolioLink}" target="_blank" class="text-pink-600 hover:underline font-mono">${v.portfolioLink}</a></p>` : ''}
             ${v.website ? `<p><span class="font-bold text-[#1E1B4B]">الموقع الرسمي:</span> <a href="${v.website}" target="_blank" class="text-pink-600 hover:underline font-mono">${v.website}</a></p>` : ''}
           </div>
+
+          ${missingFields.length > 0 ? `
+            <div class="p-2.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-[11px] font-bold">
+              ⚠️ تنبيه: ملف هذا الخبير ناقص — ينقصه: ${missingFields.join(' • ')}
+            </div>
+          ` : ''}
 
           <!-- Document Preview Triggers -->
           <div class="flex flex-wrap items-center gap-2 pt-1">
@@ -4662,13 +5137,17 @@ export function renderAdminVerifications() {
 }
 
 export function approveVerification(verifId) {
-  const verif = state.verifications.find(v => v.id === verifId);
-  if (!verif) return;
+  reconcileMentorsSource();
+  const verif = state.verifications.find(v => v.id === verifId || `verif-mentor-${v.userId}` === verifId);
+  const mentor = state.mentors.find(m => m.id === (verif ? verif.userId : verifId) || `verif-mentor-${m.id}` === verifId);
+  if (!verif && !mentor) return;
 
-  verif.status = 'verified';
+  const targetName = (verif && verif.name) || (mentor && (mentor.fullName || mentor.name)) || 'الحساب';
+  const targetUserId = (verif && verif.userId) || (mentor && mentor.id);
+
+  if (verif) verif.status = 'verified';
 
   // If mentor: mark verified and active
-  const mentor = state.mentors.find(m => m.id === verif.userId);
   if (mentor) {
     mentor.status = 'verified';
     mentor.verificationStatus = 'verified';
@@ -4676,8 +5155,8 @@ export function approveVerification(verifId) {
   }
 
   // If company: mark verified and active
-  if (state.companies) {
-    const comp = state.companies.find(c => c.id === verif.userId);
+  if (state.companies && targetUserId) {
+    const comp = state.companies.find(c => c.id === targetUserId);
     if (comp) {
       comp.status = 'verified';
       comp.verificationStatus = 'verified';
@@ -4686,25 +5165,30 @@ export function approveVerification(verifId) {
   }
 
   // If current logged-in user
-  if (state.currentUser && state.currentUser.id === verif.userId) {
+  if (state.currentUser && targetUserId && state.currentUser.id === targetUserId) {
     state.currentUser.status = 'active';
     state.currentUser.verificationStatus = 'verified';
     state.currentUser.isVerified = true;
   }
 
   saveToStorage();
-  alert(`✓ تم اعتماد وتوثيق حساب (${verif.name}) بنجاح!\nسيظهر الآن في قوائم المنصة للطلاب مع شارة "موثق ✓" باللون البنفسجي.`);
+  alert(`✓ تم اعتماد وتوثيق حساب (${targetName}) بنجاح!\nسيظهر الآن في قوائم المنصة للطلاب مع شارة "موثق ✓" باللون البنفسجي.`);
+  renderAdminApp();
+  renderAdminMentorsTable();
   renderAdminProtectionTab();
   renderMentorsList();
 }
 
 export function rejectVerification(verifId) {
-  const verif = state.verifications.find(v => v.id === verifId);
-  if (!verif) return;
+  reconcileMentorsSource();
+  const verif = state.verifications.find(v => v.id === verifId || `verif-mentor-${v.userId}` === verifId);
+  const mentor = state.mentors.find(m => m.id === (verif ? verif.userId : verifId) || `verif-mentor-${m.id}` === verifId);
+  if (!verif && !mentor) return;
 
-  verif.status = 'rejected';
+  const targetName = (verif && verif.name) || (mentor && (mentor.fullName || mentor.name)) || 'الحساب';
 
-  const mentor = state.mentors.find(m => m.id === verif.userId);
+  if (verif) verif.status = 'rejected';
+
   if (mentor) {
     mentor.status = 'rejected';
     mentor.verificationStatus = 'rejected';
@@ -4712,8 +5196,11 @@ export function rejectVerification(verifId) {
   }
 
   saveToStorage();
-  alert(`تم رفض طلب التوثيق لحساب (${verif.name}).`);
+  alert(`تم رفض طلب التوثيق لحساب (${targetName}).`);
+  renderAdminApp();
+  renderAdminMentorsTable();
   renderAdminProtectionTab();
+  renderMentorsList();
 }
 
 export function renderAdminReports() {
@@ -5303,6 +5790,11 @@ export function setupGlobalFunctions() {
     copyAdminDashboardLink,
     renderAdminStudentsTable,
     filterAdminStudents,
+    renderAdminMentorsTable,
+    filterAdminMentors,
+    approveMentorDirectly,
+    toggleMentorStatus,
+    deleteAdminMentor,
     toggleStudentStatus,
     confirmDeleteStudent,
     closeDeleteStudentModal,
