@@ -1,7 +1,6 @@
 /**
- * Backup copy of localStorage engine for Phi Ecosystem App
- * Created prior to Supabase data migration step.
- * Serves as full fallback mechanism if Supabase connection fails or is offline.
+ * Offline fallback localStorage engine for Phi Ecosystem App.
+ * Serves strictly as an offline cache / resilience fallback when Cloud Firestore is unreachable.
  */
 
 export const STORAGE_KEY_USER = 'phi_user_account_ecosystem_v1';

@@ -62,12 +62,13 @@ service cloud.firestore {
 
     function isValidUserAccount(data) {
       return data.keys().hasAll(['uid', 'profileId', 'role', 'name', 'email', 'status', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'profileId', 'role', 'name', 'email', 'status', 'joinedAt', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'profileId', 'role', 'name', 'email', 'phone', 'status', 'joinedAt', 'createdAt', 'updatedAt']) &&
         isValidId(data.uid) &&
         isValidId(data.profileId) &&
         data.role in ['student', 'mentor', 'company'] &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 32)) &&
         data.status in ['active', 'pending_verification', 'frozen', 'rejected'] &&
         (!('joinedAt' in data) || (data.joinedAt is string && data.joinedAt.size() <= 64)) &&
         data.createdAt is timestamp &&
@@ -77,7 +78,7 @@ service cloud.firestore {
     function isValidStudent(data) {
       return data.keys().hasAll(['id', 'ownerUid', 'name', 'email', 'status', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'id', 'ownerUid', 'name', 'email', 'position', 'university', 'department',
+          'id', 'ownerUid', 'name', 'email', 'phone', 'position', 'university', 'department',
           'gradYear', 'overall', 'timaStats', 'totalPoints', 'prestigeCount',
           'customTheme', 'works', 'status', 'joinedAt', 'createdAt', 'updatedAt'
         ]) &&
@@ -85,6 +86,7 @@ service cloud.firestore {
         isValidId(data.ownerUid) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
         data.email is string && data.email.size() <= 160 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 32)) &&
         (!('position' in data) || (data.position is string && data.position.size() <= 120)) &&
         (!('university' in data) || (data.university is string && data.university.size() <= 160)) &&
         (!('department' in data) || (data.department is string && data.department.size() <= 120)) &&
@@ -207,7 +209,7 @@ service cloud.firestore {
     function isValidCompany(data) {
       return data.keys().hasAll(['id', 'ownerUid', 'name', 'companyType', 'email', 'status', 'isVerified', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'id', 'ownerUid', 'name', 'companyType', 'email', 'website', 'needs',
+          'id', 'ownerUid', 'name', 'companyType', 'email', 'phone', 'website', 'needs',
           'commercialRegister', 'status', 'verificationStatus', 'isVerified',
           'joinedAt', 'createdAt', 'updatedAt'
         ]) &&
@@ -216,6 +218,7 @@ service cloud.firestore {
         data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
         data.companyType is string && data.companyType.size() <= 80 &&
         data.email is string && data.email.size() <= 160 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 32)) &&
         (!('website' in data) || (data.website is string && data.website.size() <= 300)) &&
         (!('needs' in data) || (data.needs is string && data.needs.size() <= 600)) &&
         (!('commercialRegister' in data) || (data.commercialRegister is string && data.commercialRegister.size() <= 200000)) &&
@@ -412,7 +415,8 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'ownerUid', 'title', 'type', 'approvalStatus', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
           'id', 'ownerUid', 'studentName', 'title', 'type', 'date', 'url',
-          'description', 'approvalStatus', 'views', 'createdAt', 'updatedAt'
+          'description', 'tools', 'mode', 'fileName', 'fileSizeStr',
+          'approvalStatus', 'views', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.id) &&
         isValidId(data.ownerUid) &&
@@ -420,10 +424,43 @@ service cloud.firestore {
         data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
         data.type is string && data.type.size() >= 1 && data.type.size() <= 60 &&
         (!('date' in data) || (data.date is string && data.date.size() <= 64)) &&
-        (!('url' in data) || (data.url is string && data.url.size() <= 600)) &&
+        (!('url' in data) || (data.url is string && data.url.size() <= 200000)) &&
         (!('description' in data) || (data.description is string && data.description.size() <= 1000)) &&
+        (!('tools' in data) || (data.tools is string && data.tools.size() <= 200)) &&
+        (!('mode' in data) || data.mode in ['link', 'file']) &&
+        (!('fileName' in data) || (data.fileName is string && data.fileName.size() <= 200)) &&
+        (!('fileSizeStr' in data) || (data.fileSizeStr is string && data.fileSizeStr.size() <= 40)) &&
         data.approvalStatus in ['pending', 'approved', 'rejected'] &&
         (!('views' in data) || (data.views is number && data.views >= 0)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUserCV(data) {
+      return data.keys().hasAll(['uid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'uid', 'photo', 'fullName', 'jobTitle', 'email', 'phone',
+          'address', 'linkedin', 'summary', 'experiences', 'education',
+          'mediaSkills', 'techSkills', 'languages', 'certificates',
+          'volunteering', 'lastSaved', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.uid) &&
+        (!('photo' in data) || (data.photo is string && data.photo.size() <= 200000)) &&
+        (!('fullName' in data) || (data.fullName is string && data.fullName.size() <= 160)) &&
+        (!('jobTitle' in data) || (data.jobTitle is string && data.jobTitle.size() <= 160)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 160)) &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 200)) &&
+        (!('linkedin' in data) || (data.linkedin is string && data.linkedin.size() <= 500)) &&
+        (!('summary' in data) || (data.summary is string && data.summary.size() <= 4000)) &&
+        (!('experiences' in data) || (data.experiences is list && data.experiences.size() <= 50 && (data.experiences.size() == 0 || data.experiences[0] is map))) &&
+        (!('education' in data) || data.education is map) &&
+        (!('mediaSkills' in data) || (data.mediaSkills is list && data.mediaSkills.size() <= 30 && (data.mediaSkills.size() == 0 || data.mediaSkills[0] is map))) &&
+        (!('techSkills' in data) || (data.techSkills is list && data.techSkills.size() <= 50 && (data.techSkills.size() == 0 || data.techSkills[0] is string))) &&
+        (!('languages' in data) || (data.languages is list && data.languages.size() <= 20 && (data.languages.size() == 0 || data.languages[0] is map))) &&
+        (!('certificates' in data) || (data.certificates is list && data.certificates.size() <= 40 && (data.certificates.size() == 0 || data.certificates[0] is map))) &&
+        (!('volunteering' in data) || (data.volunteering is list && data.volunteering.size() <= 40 && (data.volunteering.size() == 0 || data.volunteering[0] is map))) &&
+        (!('lastSaved' in data) || (data.lastSaved is string && data.lastSaved.size() <= 64)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -458,7 +495,7 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email', 'updatedAt']))
+          (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email', 'phone', 'updatedAt']))
         );
       allow delete: if isValidId(userId) && isAdmin();
     }
@@ -482,7 +519,7 @@ service cloud.firestore {
           isAdmin() ||
           (existing().ownerUid == request.auth.uid && existing().status != 'frozen' &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'name', 'position', 'university', 'department', 'gradYear',
+              'name', 'phone', 'position', 'university', 'department', 'gradYear',
               'overall', 'timaStats', 'totalPoints', 'prestigeCount',
               'customTheme', 'works', 'updatedAt'
             ]))
@@ -791,10 +828,29 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isAdmin() ||
           (existing().ownerUid == request.auth.uid && existing().approvalStatus != 'rejected' &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'type', 'date', 'url', 'description', 'updatedAt'])) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'type', 'date', 'url', 'description', 'tools', 'mode', 'fileName', 'fileSizeStr', 'updatedAt'])) ||
           (existing().approvalStatus == 'approved' && incoming().diff(existing()).affectedKeys().hasOnly(['views', 'updatedAt']))
         );
       allow delete: if isValidId(itemId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+    }
+
+    // ---------------------------------------------------------
+    // 17. USER CVS (Strict PII - Owner & Admin Only, keyed by UID)
+    // ---------------------------------------------------------
+    match /user_cvs/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+      allow create: if isValidId(userId) && isVerifiedEmail() && isOwner(userId) &&
+        isValidUserCV(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isVerifiedEmail() && (isOwner(userId) || isAdmin()) &&
+        isValidUserCV(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isValidId(userId) && (isOwner(userId) || isAdmin());
     }
   }
 }

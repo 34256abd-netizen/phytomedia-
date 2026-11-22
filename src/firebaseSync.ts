@@ -2,6 +2,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   setDoc,
   updateDoc,
   deleteDoc,
@@ -111,8 +112,95 @@ let activeUnsubs: Unsubscribe[] = [];
 let publicUnsubs: Unsubscribe[] = [];
 let syncStateRef: any = null;
 let syncPortfolioRef: any = null;
+let syncCvStateRef: any = null;
 let onHydrateRef: (() => void) | null = null;
 let bootInitialized = false;
+
+function normalizePortfolioDoc(raw: any) {
+  const url = typeof raw?.url === 'string' ? raw.url : (typeof raw?.fileUrl === 'string' ? raw.fileUrl : '');
+  const desc = typeof raw?.description === 'string' ? raw.description : (typeof raw?.desc === 'string' ? raw.desc : '');
+  return {
+    ...raw,
+    url,
+    fileUrl: raw?.fileUrl || url,
+    desc,
+    description: desc,
+    tools: typeof raw?.tools === 'string' ? raw.tools : '',
+    mode: raw?.mode || (url && !url.startsWith('idb://') && !url.startsWith('data:') ? 'link' : 'file'),
+    fileName: typeof raw?.fileName === 'string' ? raw.fileName : '',
+    fileSizeStr: typeof raw?.fileSizeStr === 'string' ? raw.fileSizeStr : ''
+  };
+}
+
+function sanitizeUserCVData(cvData: any, uid: string) {
+  const edu = (cvData?.education && typeof cvData.education === 'object') ? cvData.education : {};
+  const cleanExperiences = Array.isArray(cvData?.experiences)
+    ? cvData.experiences.slice(0, 50).map((exp: any) => ({
+        role: clampStr(exp?.role, 120),
+        company: clampStr(exp?.company, 120),
+        period: clampStr(exp?.period, 80),
+        desc: clampStr(exp?.desc, 600)
+      }))
+    : [];
+  const cleanMediaSkills = Array.isArray(cvData?.mediaSkills)
+    ? cvData.mediaSkills.slice(0, 30).map((s: any) => ({
+        name: clampStr(s?.name, 80),
+        level: clampNum(s?.level, 1, 5, 3)
+      }))
+    : [];
+  const cleanTechSkills = Array.isArray(cvData?.techSkills)
+    ? cvData.techSkills.slice(0, 50).map((t: unknown) => clampStr(t, 80)).filter(Boolean)
+    : [];
+  const cleanLanguages = Array.isArray(cvData?.languages)
+    ? cvData.languages.slice(0, 20).map((l: any) => ({
+        name: clampStr(l?.name, 80),
+        level: clampStr(l?.level, 80)
+      }))
+    : [{ name: 'اللغة العربية', level: 'لغة أم (Native)' }];
+  const cleanCertificates = Array.isArray(cvData?.certificates)
+    ? cvData.certificates.slice(0, 40).map((c: any) => ({
+        title: clampStr(c?.title, 160),
+        issuer: clampStr(c?.issuer, 160),
+        year: clampStr(c?.year, 32),
+        linkOrImg: clampStr(c?.linkOrImg, 400)
+      }))
+    : [];
+  const cleanVolunteering = Array.isArray(cvData?.volunteering)
+    ? cvData.volunteering.slice(0, 40).map((v: any) => ({
+        name: clampStr(v?.name, 160),
+        role: clampStr(v?.role, 120),
+        year: clampStr(v?.year, 32),
+        desc: clampStr(v?.desc, 400)
+      }))
+    : [];
+
+  return {
+    uid,
+    photo: clampMediaRef(cvData?.photo, 150000, ''),
+    fullName: clampStr(cvData?.fullName, 160),
+    jobTitle: clampStr(cvData?.jobTitle, 160),
+    email: clampStr(cvData?.email, 160),
+    phone: clampStr(cvData?.phone, 40),
+    address: clampStr(cvData?.address, 200),
+    linkedin: clampStr(cvData?.linkedin, 500),
+    summary: clampStr(cvData?.summary, 4000),
+    experiences: cleanExperiences,
+    education: {
+      university: clampStr(edu.university, 160),
+      faculty: clampStr(edu.faculty, 160),
+      department: clampStr(edu.department, 120),
+      gradYear: clampStr(edu.gradYear, 32),
+      grade: clampStr(edu.grade, 60),
+      gradProject: clampStr(edu.gradProject, 300)
+    },
+    mediaSkills: cleanMediaSkills,
+    techSkills: cleanTechSkills,
+    languages: cleanLanguages,
+    certificates: cleanCertificates,
+    volunteering: cleanVolunteering,
+    lastSaved: clampStr(cvData?.lastSaved, 64, new Date().toISOString())
+  };
+}
 
 function clearSubs(list: Unsubscribe[]) {
   while (list.length > 0) {
@@ -317,6 +405,7 @@ function attachOwnerListeners(user: User) {
             role: uData.role,
             name: uData.name,
             email: uData.email,
+            phone: uData.phone || syncStateRef.currentUser?.phone || '',
             status: uData.status,
             joinedAt: uData.joinedAt || ''
           };
@@ -347,6 +436,7 @@ function attachOwnerListeners(user: User) {
               role: 'student',
               name: mine.name,
               email: mine.email,
+              phone: mine.phone || syncStateRef.currentUser?.phone || '',
               university: mine.university,
               department: mine.department,
               gradYear: mine.gradYear,
@@ -516,18 +606,40 @@ function attachOwnerListeners(user: User) {
       query(collection(db, 'portfolio_items'), where('ownerUid', '==', uid)),
       (snap) => {
         if (!syncPortfolioRef) return;
-        const items = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        const items = snap.docs.map((d) => normalizePortfolioDoc({ ...d.data(), id: d.id }));
         syncPortfolioRef.items = mergeById(syncPortfolioRef.items || [], items, true);
         triggerHydrate();
       },
       (err) => handleFirestoreError(err, OperationType.LIST, 'portfolio_items')
     )
   );
+
+  // Own CV document keyed by UID
+  activeUnsubs.push(
+    onSnapshot(
+      doc(db, 'user_cvs', uid),
+      (snap) => {
+        if (!syncCvStateRef || !snap.exists()) return;
+        const remoteCV = snap.data();
+        syncCvStateRef.data = {
+          ...(syncCvStateRef.data || {}),
+          ...remoteCV,
+          education: {
+            ...(syncCvStateRef.data?.education || {}),
+            ...(remoteCV?.education || {})
+          }
+        };
+        triggerHydrate();
+      },
+      (err) => handleFirestoreError(err, OperationType.GET, `user_cvs/${uid}`)
+    )
+  );
 }
 
-export function initFirebaseBridge(state: any, portfolioState: any, onHydrate: () => void) {
+export function initFirebaseBridge(state: any, portfolioState: any, onHydrate: () => void, cvState?: any) {
   syncStateRef = state;
   syncPortfolioRef = portfolioState;
+  if (cvState) syncCvStateRef = cvState;
   onHydrateRef = onHydrate;
 
   if (bootInitialized) return;
@@ -574,6 +686,200 @@ export function initFirebaseBridge(state: any, portfolioState: any, onHydrate: (
   });
 }
 
+export async function hydrateUserWorkspaceFromCloud(user: User): Promise<{
+  foundProfile: boolean;
+  role: string | null;
+  fallbackUsed: boolean;
+}> {
+  if (!user || !user.uid) {
+    return { foundProfile: false, role: null, fallbackUsed: true };
+  }
+  const uid = sanitizeId(user.uid, 'uid');
+  let foundProfile = false;
+  let detectedRole: string | null = null;
+
+  try {
+    // 1. Load user account identity
+    const userSnap = await getDoc(doc(db, 'users', uid));
+    if (userSnap.exists() && syncStateRef) {
+      const uData = userSnap.data();
+      detectedRole = uData.role || null;
+      foundProfile = true;
+      syncStateRef.currentUser = {
+        ...(syncStateRef.currentUser || {}),
+        id: uData.profileId || uid,
+        uid,
+        role: uData.role,
+        name: uData.name || user.displayName || '',
+        email: uData.email || user.email || '',
+        phone: uData.phone || '',
+        status: uData.status || 'active',
+        joinedAt: uData.joinedAt || ''
+      };
+    }
+
+    // 2. Hydrate role-specific profile by ownerUid
+    if (syncStateRef && (!detectedRole || detectedRole === 'student')) {
+      const sSnap = await getDocs(query(collection(db, 'students'), where('ownerUid', '==', uid)));
+      if (!sSnap.empty) {
+        const items = sSnap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        const mine: any = items[0];
+        foundProfile = true;
+        detectedRole = 'student';
+        syncStateRef.students = mergeById(syncStateRef.students || [], items, true);
+        syncStateRef.currentUser = {
+          ...(syncStateRef.currentUser || {}),
+          id: mine.id,
+          uid,
+          role: 'student',
+          name: mine.name,
+          email: mine.email,
+          phone: mine.phone || syncStateRef.currentUser?.phone || '',
+          university: mine.university,
+          department: mine.department,
+          gradYear: mine.gradYear,
+          status: mine.status,
+          joinedAt: mine.joinedAt
+        };
+        if (mine.timaStats) {
+          syncStateRef.timaCard.stats = { ...syncStateRef.timaCard.stats, ...mine.timaStats };
+        }
+        if (mine.overall !== undefined) syncStateRef.timaCard.overall = mine.overall;
+        if (mine.totalPoints !== undefined) syncStateRef.totalPoints = mine.totalPoints;
+        if (mine.name) syncStateRef.timaCard.name = mine.name;
+        if (mine.department) syncStateRef.timaCard.department = mine.department;
+        if (mine.gradYear) syncStateRef.timaCard.gradYear = mine.gradYear;
+      }
+    }
+
+    if (syncStateRef && (!detectedRole || detectedRole === 'mentor')) {
+      const mSnap = await getDocs(query(collection(db, 'mentors'), where('ownerUid', '==', uid)));
+      if (!mSnap.empty) {
+        const items = mSnap.docs.map((d) => ({
+          ...d.data(),
+          id: d.id,
+          idProof: d.data().idProofRef || '',
+          syndicateCard: d.data().syndicateCardRef || ''
+        }));
+        const mine: any = items[0];
+        foundProfile = true;
+        detectedRole = 'mentor';
+        syncStateRef.mentors = mergeById(syncStateRef.mentors || [], items, true);
+        syncStateRef.currentUser = {
+          ...(syncStateRef.currentUser || {}),
+          ...mine,
+          id: mine.id,
+          uid,
+          role: 'mentor'
+        };
+      }
+    }
+
+    if (syncStateRef && (!detectedRole || detectedRole === 'company')) {
+      const cSnap = await getDocs(query(collection(db, 'companies'), where('ownerUid', '==', uid)));
+      if (!cSnap.empty) {
+        const items = cSnap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        const mine: any = items[0];
+        foundProfile = true;
+        detectedRole = 'company';
+        syncStateRef.companies = mergeById(syncStateRef.companies || [], items, true);
+        syncStateRef.currentUser = {
+          ...(syncStateRef.currentUser || {}),
+          ...mine,
+          id: mine.id,
+          uid,
+          role: 'company'
+        };
+      }
+    }
+
+    // 3. Hydrate CV keyed by UID
+    if (syncCvStateRef) {
+      const cvSnap = await getDoc(doc(db, 'user_cvs', uid));
+      if (cvSnap.exists()) {
+        const remoteCV = cvSnap.data();
+        syncCvStateRef.data = {
+          ...(syncCvStateRef.data || {}),
+          ...remoteCV,
+          education: {
+            ...(syncCvStateRef.data?.education || {}),
+            ...(remoteCV?.education || {})
+          }
+        };
+      }
+    }
+
+    // 4. Hydrate Portfolio items owned by UID
+    if (syncPortfolioRef) {
+      const portSnap = await getDocs(query(collection(db, 'portfolio_items'), where('ownerUid', '==', uid)));
+      const items = portSnap.docs.map((d) => normalizePortfolioDoc({ ...d.data(), id: d.id }));
+      if (items.length > 0) {
+        syncPortfolioRef.items = mergeById(syncPortfolioRef.items || [], items, true);
+      }
+    }
+
+    triggerHydrate();
+    return { foundProfile, role: detectedRole, fallbackUsed: false };
+  } catch (err) {
+    console.warn('Firestore workspace hydration failed; using offline local cache fallback:', err);
+    return {
+      foundProfile: Boolean(syncStateRef?.currentUser && syncStateRef.currentUser.uid === uid),
+      role: syncStateRef?.currentUser?.role || null,
+      fallbackUsed: true
+    };
+  }
+}
+
+export async function syncUserCVToCloud(cvData: any): Promise<boolean> {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified) return false;
+  const uid = sanitizeId(user.uid, 'uid');
+  const ref = doc(db, 'user_cvs', uid);
+  const cleanPayload = sanitizeUserCVData(cvData, uid);
+
+  try {
+    const existingSnap = await getDoc(ref);
+    if (existingSnap.exists()) {
+      await setDoc(ref, {
+        ...cleanPayload,
+        createdAt: existingSnap.data()?.createdAt || serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+    } else {
+      await setDoc(ref, {
+        ...cleanPayload,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+    }
+    return true;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `user_cvs/${uid}`);
+  }
+}
+
+export async function getUserCVFromCloud(uidOverride?: string): Promise<any | null> {
+  const uid = sanitizeId(uidOverride || auth.currentUser?.uid || '', 'uid');
+  if (!auth.currentUser || !uid) return null;
+  try {
+    const snap = await getDoc(doc(db, 'user_cvs', uid));
+    return snap.exists() ? snap.data() : null;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, `user_cvs/${uid}`);
+  }
+}
+
+export async function getPortfolioItemsFromCloud(uidOverride?: string): Promise<any[]> {
+  const uid = sanitizeId(uidOverride || auth.currentUser?.uid || '', 'uid');
+  if (!auth.currentUser || !uid) return [];
+  try {
+    const snap = await getDocs(query(collection(db, 'portfolio_items'), where('ownerUid', '==', uid)));
+    return snap.docs.map((d) => normalizePortfolioDoc({ ...d.data(), id: d.id }));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.LIST, 'portfolio_items');
+  }
+}
+
 // -------------------------------------------------------------
 // FIRESTORE SYNC MUTATION HELPERS (Strictly Validated & Clamped)
 // -------------------------------------------------------------
@@ -594,6 +900,7 @@ export async function syncStudentRegistrationToCloud(student: any, totalPoints =
     role: 'student',
     name,
     email,
+    phone: clampStr(student.phone, 32),
     status: 'active',
     joinedAt,
     createdAt: serverTimestamp(),
@@ -605,6 +912,7 @@ export async function syncStudentRegistrationToCloud(student: any, totalPoints =
     ownerUid: uid,
     name,
     email,
+    phone: clampStr(student.phone, 32),
     position: clampStr(student.position, 120, 'طالب إعلام'),
     university: clampStr(student.university, 160, 'جامعة القاهرة'),
     department: clampStr(student.department, 120, 'إذاعة وتلفزيون'),
@@ -885,6 +1193,7 @@ export async function syncCompanyRegistrationToCloud(company: any, verif: any) {
     role: 'company',
     name,
     email,
+    phone: clampStr(company.phone, 32),
     status: 'pending_verification',
     joinedAt,
     createdAt: serverTimestamp(),
@@ -897,6 +1206,7 @@ export async function syncCompanyRegistrationToCloud(company: any, verif: any) {
     name,
     companyType: clampStr(company.companyType, 80, 'شركة انتاج'),
     email,
+    phone: clampStr(company.phone, 32),
     website: clampStr(company.website, 300),
     needs: clampStr(company.needs, 600),
     commercialRegister,
@@ -1336,6 +1646,8 @@ export async function syncPortfolioItemCreateToCloud(item: any) {
   const user = auth.currentUser;
   if (!user || !user.emailVerified) return;
   const itemId = sanitizeId(item.id, 'port');
+  const rawUrl = item.url || item.link || item.fileUrl || '';
+  const safeUrl = rawUrl.startsWith('blob:') ? `idb://${itemId}` : clampMediaRef(rawUrl, 150000, `idb://${itemId}`);
   try {
     await setDoc(doc(db, 'portfolio_items', itemId), {
       id: itemId,
@@ -1344,8 +1656,12 @@ export async function syncPortfolioItemCreateToCloud(item: any) {
       title: clampStr(item.title, 200, 'عمل إعلامي'),
       type: clampStr(item.type, 60, 'فيديو'),
       date: clampStr(item.date, 64),
-      url: clampStr(item.url || item.link, 600),
+      url: safeUrl,
       description: clampStr(item.desc || item.description, 1000),
+      tools: clampStr(item.tools, 200),
+      mode: item.mode === 'file' ? 'file' : 'link',
+      fileName: clampStr(item.fileName, 200),
+      fileSizeStr: clampStr(item.fileSizeStr, 40),
       approvalStatus: 'pending',
       views: clampNum(item.views, 0, 10000000, 1),
       createdAt: serverTimestamp(),

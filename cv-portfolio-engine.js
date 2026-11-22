@@ -4,7 +4,14 @@
 // =============================================================
 
 import { state, addTimaPoints, compressImageFile } from './app-logic.js';
-import { syncPortfolioItemCreateToCloud, syncPortfolioItemDeleteFromCloud } from './src/firebaseSync.ts';
+import {
+  syncUserCVToCloud,
+  getUserCVFromCloud,
+  getPortfolioItemsFromCloud,
+  getFirebaseAuthStateSnapshot,
+  syncPortfolioItemCreateToCloud,
+  syncPortfolioItemDeleteFromCloud
+} from './src/firebaseSync.ts';
 import arabicReshaper from 'arabic-reshaper';
 import bidiFactory from 'bidi-js';
 
@@ -150,7 +157,7 @@ export const portfolioState = {
   }
 };
 
-// Storage helper functions
+// Storage helper functions (UID-first with email offline fallback)
 export function getUserEmail() {
   if (state.currentUser && state.currentUser.email) {
     return state.currentUser.email.trim().toLowerCase();
@@ -158,22 +165,32 @@ export function getUserEmail() {
   return 'guest_student@phitomedia.eg';
 }
 
+export function getUserStorageUid() {
+  if (state.currentUser && state.currentUser.uid) {
+    return String(state.currentUser.uid).trim();
+  }
+  const snap = getFirebaseAuthStateSnapshot();
+  return snap.uid ? String(snap.uid).trim() : '';
+}
+
 export function getCVStorageKey() {
-  return `tima_cv_${getUserEmail()}`;
+  const uid = getUserStorageUid();
+  return uid ? `tima_cv_${uid}` : `tima_cv_${getUserEmail()}`;
 }
 
 export function getPortfolioStorageKey() {
-  return `tima_portfolio_${getUserEmail()}`;
+  const uid = getUserStorageUid();
+  return uid ? `tima_portfolio_${uid}` : `tima_portfolio_${getUserEmail()}`;
 }
 
 // Default initial works for student portfolio
 export const DEFAULT_PORTFOLIO_ITEMS = [];
 
 
-// Load CV & Portfolio for current user
+// Load CV & Portfolio for current user (Cloud Firestore primary + localStorage offline fallback)
 export function loadCVAndPortfolio() {
   try {
-    const cvRaw = localStorage.getItem(getCVStorageKey());
+    const cvRaw = localStorage.getItem(getCVStorageKey()) || localStorage.getItem(`tima_cv_${getUserEmail()}`);
     if (cvRaw) {
       const parsed = JSON.parse(cvRaw);
       cvState.data = Object.assign(createEmptyCV(), parsed);
@@ -186,6 +203,9 @@ export function loadCVAndPortfolio() {
       if (state.currentUser) {
         cvState.data.fullName = state.currentUser.name || '';
         cvState.data.email = state.currentUser.email || '';
+        if (state.currentUser.phone) {
+          cvState.data.phone = state.currentUser.phone;
+        }
         if (state.currentUser.department) {
           cvState.data.education.department = state.currentUser.department;
         }
@@ -195,22 +215,18 @@ export function loadCVAndPortfolio() {
       }
     }
   } catch (e) {
-    console.error('Error loading CV:', e);
+    console.error('Error loading CV fallback:', e);
     cvState.data = createEmptyCV();
   }
 
   try {
     const key = getPortfolioStorageKey();
-    const portRaw = localStorage.getItem(key);
+    const portRaw = localStorage.getItem(key) ?? localStorage.getItem(`tima_portfolio_${getUserEmail()}`);
     if (portRaw !== null) {
       portfolioState.items = JSON.parse(portRaw);
       if (!Array.isArray(portfolioState.items)) portfolioState.items = [];
     } else {
-      // First-time load: populate with default items and persist
       portfolioState.items = [...DEFAULT_PORTFOLIO_ITEMS];
-      try {
-        localStorage.setItem(key, JSON.stringify(portfolioState.items));
-      } catch (err) {}
     }
 
     // Restore any IDB-backed files asynchronously
@@ -229,8 +245,46 @@ export function loadCVAndPortfolio() {
       }
     });
   } catch (e) {
-    console.error('Error loading Portfolio:', e);
+    console.error('Error loading Portfolio fallback:', e);
     portfolioState.items = [...DEFAULT_PORTFOLIO_ITEMS];
+  }
+
+  // Hydrate authoritative CV & Portfolio from Cloud Firestore when signed in
+  const snap = getFirebaseAuthStateSnapshot();
+  if (snap.isSignedIn && snap.uid) {
+    Promise.allSettled([
+      getUserCVFromCloud(snap.uid),
+      getPortfolioItemsFromCloud(snap.uid)
+    ]).then(([cvRes, portRes]) => {
+      let updated = false;
+      if (cvRes.status === 'fulfilled' && cvRes.value) {
+        cvState.data = Object.assign(createEmptyCV(), cvRes.value);
+        if (!Array.isArray(cvState.data.languages) || cvState.data.languages.length === 0) {
+          cvState.data.languages = [{ name: 'اللغة العربية', level: 'لغة أم (Native)' }];
+        }
+        try {
+          localStorage.setItem(getCVStorageKey(), JSON.stringify(cvState.data));
+        } catch (_) {}
+        updated = true;
+      }
+      if (portRes.status === 'fulfilled' && Array.isArray(portRes.value) && portRes.value.length > 0) {
+        const byId = new Map();
+        (portfolioState.items || []).forEach((it) => { if (it && it.id) byId.set(String(it.id), it); });
+        portRes.value.forEach((remote) => { if (remote && remote.id) byId.set(String(remote.id), { ...(byId.get(String(remote.id)) || {}), ...remote }); });
+        portfolioState.items = Array.from(byId.values());
+        try {
+          localStorage.setItem(getPortfolioStorageKey(), JSON.stringify(portfolioState.items));
+        } catch (_) {}
+        updated = true;
+      }
+      if (updated) {
+        renderCVStepForm();
+        renderCVPreview();
+        renderPortfolioSection();
+      }
+    }).catch((err) => {
+      console.warn('Cloud CV/Portfolio hydration fell back to local cache:', err);
+    });
   }
 }
 
@@ -294,24 +348,38 @@ export async function deleteFileFromIndexedDB(id) {
   } catch (e) {}
 }
 
-// Save CV to localStorage and update Tima Card stats
+// Save CV to Cloud Firestore (keyed by UID) with localStorage offline fallback
 export function saveCV(silent = false) {
   cvState.data.lastSaved = new Date().toISOString();
+
+  // Offline / instant fallback cache
   try {
     localStorage.setItem(getCVStorageKey(), JSON.stringify(cvState.data));
-    
-    // Sync with Tima Card stats automatically!
-    syncCVWithTimaCard();
-
-    if (!silent) {
-      showToast('تم حفظ بيانات السيرة الذاتية بنجاح في ملفك الشخصي! 💾✨');
-    }
   } catch (e) {
-    console.warn('CV storage quota exceeded:', e);
-    if (!silent && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED')) {
-      alert('⚠️ تنبيه: مساحة التخزين المحلية ممتلئة!\n\nتعذر حفظ بيانات السيرة الذاتية كاملة بسبب كثرة البيانات أو الصور. يرجى محاولة حذف بعض الصور أو النصوص الطويلة لضمان الحفظ.');
-    }
+    console.warn('CV fallback local cache warning:', e);
   }
+
+  // Sync with Tima Card stats automatically!
+  syncCVWithTimaCard();
+
+  // Persist to Cloud Firestore keyed by UID
+  syncUserCVToCloud(cvState.data)
+    .then((synced) => {
+      if (!silent) {
+        if (synced) {
+          showToast('تم حفظ بيانات السيرة الذاتية في سحابة Firestore بنجاح! ☁️✨');
+        } else {
+          showToast('تم حفظ السيرة الذاتية محلياً (سجّل دخول Google للمزامنة السحابية) 💾');
+        }
+      }
+    })
+    .catch((err) => {
+      console.warn('Cloud CV save failed, fallback local cache preserved:', err);
+      if (!silent) {
+        showToast('تعذر الحفظ السحابي مؤقتاً — تم الاحتفاظ بالبيانات محلياً كنسخة احتياطية ⚠️');
+      }
+    });
+
   renderCVPreview();
 }
 

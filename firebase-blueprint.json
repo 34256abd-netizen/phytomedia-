@@ -65,6 +65,11 @@
           "maxLength": 160,
           "description": "User contact email (PII)."
         },
+        "phone": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "User contact phone number (PII)."
+        },
         "status": {
           "type": "string",
           "enum": ["active", "pending_verification", "frozen", "rejected"],
@@ -111,6 +116,10 @@
         "email": {
           "type": "string",
           "maxLength": 160
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 32
         },
         "position": {
           "type": "string",
@@ -497,6 +506,10 @@
         "email": {
           "type": "string",
           "maxLength": 160
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 32
         },
         "website": {
           "type": "string",
@@ -1097,11 +1110,27 @@
         },
         "url": {
           "type": "string",
-          "maxLength": 600
+          "maxLength": 200000
         },
         "description": {
           "type": "string",
           "maxLength": 1000
+        },
+        "tools": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["link", "file"]
+        },
+        "fileName": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "fileSizeStr": {
+          "type": "string",
+          "maxLength": 40
         },
         "approvalStatus": {
           "type": "string",
@@ -1120,6 +1149,84 @@
         }
       },
       "required": ["id", "ownerUid", "title", "type", "approvalStatus", "createdAt", "updatedAt"]
+    },
+    "UserCV": {
+      "title": "UserCV",
+      "description": "Per-user structured CV stored in Cloud Firestore keyed by Firebase Auth UID (strict owner & admin only).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "photo": {
+          "type": "string",
+          "maxLength": 200000
+        },
+        "fullName": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "jobTitle": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "linkedin": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "experiences": {
+          "type": "array"
+        },
+        "education": {
+          "type": "object"
+        },
+        "mediaSkills": {
+          "type": "array"
+        },
+        "techSkills": {
+          "type": "array"
+        },
+        "languages": {
+          "type": "array"
+        },
+        "certificates": {
+          "type": "array"
+        },
+        "volunteering": {
+          "type": "array"
+        },
+        "lastSaved": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -1130,6 +1237,10 @@
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserAccount" },
       "description": "Private user account identities mapped 1:1 to Firebase Auth UID."
+    },
+    "/user_cvs/{userId}": {
+      "schema": { "$ref": "#/entities/UserCV" },
+      "description": "Private per-user CV builder document keyed 1:1 to Firebase Auth UID."
     },
     "/students/{studentId}": {
       "schema": { "$ref": "#/entities/Student" },

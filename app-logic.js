@@ -4,8 +4,8 @@ import ExpertInstaPay from './src/components/ExpertInstaPay';
 import DownloadCVButton from './src/components/DownloadCVButton';
 import MentorPaymentGateway from './src/components/MentorPaymentGateway';
 import { INITIAL_DATA } from './data.js';
-import { loadFromStorageEngine, saveToStorageEngine, isSupabaseConnected } from './src/supabaseStorage.js';
 import { loadFromLocalStorage, saveToLocalStorage } from './backup-localStorage.js';
+import { getFirebaseAuthErrorMessage } from './src/firebase.ts';
 import {
   initFirebaseBridge,
   ensureGoogleAuth,
@@ -13,6 +13,7 @@ import {
   firebaseSignOut,
   isFirebaseAdminUser,
   getFirebaseAuthStateSnapshot,
+  hydrateUserWorkspaceFromCloud,
   syncStudentRegistrationToCloud,
   syncAdminAddedStudentToCloud,
   syncStudentProgressToCloud,
@@ -36,6 +37,7 @@ import {
 } from './src/firebaseSync.ts';
 import {
   loadCVAndPortfolio,
+  createEmptyCV,
   saveCV,
   savePortfolio,
   syncCVWithTimaCard,
@@ -221,7 +223,7 @@ export function initApp() {
     updateCloudAuthBadges();
     saveToStorage();
     renderApp();
-  });
+  }, cvState);
   
   // Check if role is saved in localStorage or URL hash/path
   const hash = window.location.hash;
@@ -284,6 +286,44 @@ export function updateCloudAuthBadges() {
   }
 }
 
+function showAuthBanner(message, type = 'error') {
+  let banner = document.getElementById('phi-auth-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'phi-auth-banner';
+    document.body.appendChild(banner);
+  }
+  const palette =
+    type === 'success'
+      ? 'bg-emerald-950/95 text-emerald-100 border-emerald-500/60'
+      : type === 'info'
+        ? 'bg-indigo-950/95 text-indigo-100 border-purple-400/60'
+        : 'bg-rose-950/95 text-rose-100 border-rose-500/70';
+  banner.className = `fixed top-4 left-1/2 -translate-x-1/2 z-[9999] max-w-lg w-[92vw] px-4 py-3 rounded-2xl border shadow-2xl text-xs sm:text-sm font-bold flex items-center justify-between gap-3 backdrop-blur-md transition-all duration-200 ${palette}`;
+  banner.innerHTML = '';
+
+  const textSpan = document.createElement('span');
+  textSpan.className = 'leading-relaxed';
+  textSpan.textContent = message;
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-black shrink-0 cursor-pointer';
+  closeBtn.textContent = '✕';
+  closeBtn.onclick = () => {
+    banner.classList.add('hidden');
+  };
+
+  banner.appendChild(textSpan);
+  banner.appendChild(closeBtn);
+  banner.classList.remove('hidden');
+
+  clearTimeout(banner._hideTimer);
+  banner._hideTimer = setTimeout(() => {
+    banner.classList.add('hidden');
+  }, type === 'error' ? 7500 : 4500);
+}
+
 export async function connectGoogleForSignup() {
   try {
     const user = await forceGoogleSignIn();
@@ -296,10 +336,15 @@ export async function connectGoogleForSignup() {
       nameInput.value = user.displayName;
     }
     updateCloudAuthBadges();
-    showToast(`تم ربط حساب Google (${user.email}) بنجاح ☁️`);
+    showAuthBanner(`تم ربط حساب Google (${user.email}) بنجاح ☁️`, 'success');
   } catch (err) {
     console.warn('Google signup connect cancelled or failed:', err);
-    alert('تعذر الاتصال بحساب Google. تأكد من السماح بالنوافذ المنبثقة ثم حاول مرة أخرى.');
+    const friendly = getFirebaseAuthErrorMessage(err);
+    const statusText = document.getElementById('signup-google-status-text');
+    if (statusText) {
+      statusText.innerText = `⚠️ ${friendly}`;
+    }
+    showAuthBanner(friendly, 'error');
   }
 }
 
@@ -323,22 +368,31 @@ export async function loginWithGoogleQuick() {
       window.location.hash = '#admin';
       saveToStorage();
       renderApp();
-      showToast('✓ تم تسجيل دخول الإدارة السحابي بنجاح!');
+      showAuthBanner('✓ تم تسجيل دخول الإدارة السحابي بنجاح!', 'success');
       return;
     }
-    showToast(`✓ أهلاً بك (${user.displayName || user.email})! جاري استعادة بياناتك من السحابة...`);
-    setTimeout(() => {
-      if (state.currentUser && state.currentUser.uid === user.uid) {
-        if (state.currentUser.role === 'mentor') navigateView('mentor-app');
-        else if (state.currentUser.role === 'company') navigateView('company-app');
-        else navigateView('student-app');
-      } else {
-        navigateView('role-select');
-      }
-    }, 900);
+
+    showAuthBanner(`✓ أهلاً بك (${user.displayName || user.email})! جاري استعادة ملفك من Firestore...`, 'info');
+    const hydration = await hydrateUserWorkspaceFromCloud(user);
+    if (hydration.fallbackUsed) {
+      loadCVAndPortfolio();
+      showAuthBanner('⚠️ تعذر الوصول إلى Firestore لحظياً — تم تحميل النسخة الاحتياطية المحلية.', 'info');
+    }
+
+    if (state.currentUser && state.currentUser.uid === user.uid) {
+      saveToStorage();
+      if (state.currentUser.role === 'mentor') navigateView('mentor-app');
+      else if (state.currentUser.role === 'company') navigateView('company-app');
+      else navigateView('student-app');
+      showAuthBanner(`✓ تم استعادة حسابك وبياناتك بنجاح (${user.email}) ☁️`, 'success');
+    } else {
+      navigateView('role-select');
+      showAuthBanner(`✓ تم تسجيل الدخول بحساب Google (${user.email}) — اختر دورك لإكمال ملفك.`, 'info');
+    }
   } catch (err) {
     console.warn('Google quick login error:', err);
-    alert('تعذر تسجيل الدخول عبر Google. تأكد من السماح بالنوافذ المنبثقة.');
+    const friendly = getFirebaseAuthErrorMessage(err);
+    showAuthBanner(friendly, 'error');
   }
 }
 
@@ -347,7 +401,13 @@ export async function loginAdminWithGoogle() {
     const user = await forceGoogleSignIn();
     if (!isFirebaseAdminUser(user)) {
       await firebaseSignOut();
-      alert(`⛔ هذا الحساب (${user.email || 'غير معروف'}) غير مصرح له بالدخول للوحة الإدارة. يرجى تسجيل الدخول بحساب الإدارة المعتمد.`);
+      const deniedMsg = `⛔ هذا الحساب (${user.email || 'غير معروف'}) غير مصرح له بالدخول للوحة الإدارة. يرجى تسجيل الدخول بحساب الإدارة المعتمد.`;
+      const lockErr = document.getElementById('admin-lock-error');
+      if (lockErr) {
+        lockErr.innerText = deniedMsg;
+        lockErr.classList.remove('hidden');
+      }
+      showAuthBanner(deniedMsg, 'error');
       return;
     }
     sessionStorage.setItem('phi_admin_authenticated', 'true');
@@ -368,10 +428,16 @@ export async function loginAdminWithGoogle() {
     updateCloudAuthBadges();
     renderApp();
     window.scrollTo({ top: 0, behavior: 'smooth' });
-    showToast(`✓ تم تفعيل المزامنة السحابية الفورية للإدارة (${user.email}) ☁️`);
+    showAuthBanner(`✓ تم تفعيل المزامنة السحابية الفورية للإدارة (${user.email}) ☁️`, 'success');
   } catch (err) {
     console.warn('Admin Google login error:', err);
-    alert('تعذر إتمام دخول Google للإدارة. تأكد من السماح بالنوافذ المنبثقة ثم حاول مجدداً.');
+    const friendly = getFirebaseAuthErrorMessage(err);
+    const lockErr = document.getElementById('admin-lock-error');
+    if (lockErr) {
+      lockErr.innerText = friendly;
+      lockErr.classList.remove('hidden');
+    }
+    showAuthBanner(friendly, 'error');
   }
 }
 
@@ -389,7 +455,7 @@ function pushCurrentStudentProgress() {
 }
 
 function loadFromStorage() {
-  loadFromStorageEngine(state, INITIAL_DATA, checkAndApplyAutoBlock, loadCVAndPortfolio, syncCVWithTimaCard);
+  loadFromLocalStorage(state, INITIAL_DATA, checkAndApplyAutoBlock, loadCVAndPortfolio, syncCVWithTimaCard);
 }
 
 // -------------------------------------------------------------
@@ -555,7 +621,7 @@ export function safeSetItem(key, value) {
 }
 
 export function saveToStorage() {
-  saveToStorageEngine(state);
+  saveToLocalStorage(state);
 }
 
 // Navigation
@@ -1128,7 +1194,7 @@ export async function submitRoleSignup() {
     fbUser = await ensureGoogleAuth();
   } catch (authErr) {
     console.warn('Google auth required for cloud signup:', authErr);
-    alert('يجب تأكيد الدخول بحساب Google لحفظ ملفك في السحابة وتمكين الإدارة من متابعتك عبر المنصة.');
+    showAuthBanner(getFirebaseAuthErrorMessage(authErr), 'error');
     return;
   }
 
@@ -1488,6 +1554,8 @@ export async function submitRoleSignup() {
 
 export function logoutUser() {
   state.currentUser = null;
+  cvState.data = createEmptyCV();
+  portfolioState.items = [];
   localStorage.removeItem(STORAGE_KEY_USER);
   firebaseSignOut().catch(() => {});
   navigateView('landing');
