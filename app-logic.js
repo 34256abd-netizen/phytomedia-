@@ -634,6 +634,10 @@ function renderRoleSignupForm(role) {
           <input type="email" id="reg-email" placeholder="mariam@cu.edu.eg" class="w-full px-3.5 py-2.5 rounded-xl bg-purple-50/50 border border-purple-200 text-xs outline-none focus:border-[#7C3AED] font-mono">
         </div>
         <div>
+          <label class="block text-xs font-bold text-[#1E1B4B] mb-1">رقم التليفون</label>
+          <input type="tel" id="reg-phone" dir="ltr" placeholder="01012345678" class="w-full px-3.5 py-2.5 rounded-xl bg-purple-50/50 border border-purple-200 text-xs outline-none focus:border-[#7C3AED] font-mono text-right">
+        </div>
+        <div>
           <label class="block text-xs font-bold text-[#1E1B4B] mb-1">كلمة المرور *</label>
           <input type="password" id="reg-password" placeholder="••••••••" class="w-full px-3.5 py-2.5 rounded-xl bg-purple-50/50 border border-purple-200 text-xs outline-none focus:border-[#7C3AED]">
         </div>
@@ -673,6 +677,10 @@ function renderRoleSignupForm(role) {
         <div>
           <label class="block text-xs font-bold text-[#1E1B4B] mb-1">الاسم المهني *</label>
           <input type="text" id="reg-name" placeholder="مثال: أحمد كمال الدين" class="w-full px-3.5 py-2.5 rounded-xl bg-purple-50/50 border border-purple-200 text-xs outline-none focus:border-[#7C3AED]">
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-[#1E1B4B] mb-1">رقم التليفون</label>
+          <input type="tel" id="reg-phone" dir="ltr" placeholder="01012345678" class="w-full px-3.5 py-2.5 rounded-xl bg-purple-50/50 border border-purple-200 text-xs outline-none focus:border-[#7C3AED] font-mono text-right">
         </div>
         <div>
           <label class="block text-xs font-bold text-[#1E1B4B] mb-1">التخصص الدقيق جداً *</label>
@@ -829,6 +837,10 @@ function renderRoleSignupForm(role) {
             <input type="email" id="reg-email" placeholder="hr@awan-media.com" class="w-full px-3.5 py-2.5 rounded-xl bg-purple-50/50 border border-purple-200 text-xs outline-none focus:border-[#7C3AED] font-mono">
             <span class="text-[10px] text-rose-600 block mt-0.5">⚠️ شرط إلزامي: نطاق مؤسسي وليس Gmail</span>
           </div>
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-[#1E1B4B] mb-1">رقم التليفون</label>
+          <input type="tel" id="reg-phone" dir="ltr" placeholder="01012345678" class="w-full px-3.5 py-2.5 rounded-xl bg-purple-50/50 border border-purple-200 text-xs outline-none focus:border-[#7C3AED] font-mono text-right">
         </div>
         <div>
           <label class="block text-xs font-bold text-[#1E1B4B] mb-1">رابط الموقع الرسمي للشركة *</label>
@@ -1063,6 +1075,18 @@ export function validateRoleSignupForm() {
   }
 }
 
+async function sendAdminEmailNotification(payload) {
+  try {
+    await fetch('/api/notify-admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    console.warn('Admin email notification request failed:', err);
+  }
+}
+
 export async function submitRoleSignup() {
   const role = state.activeRoleModal;
   const chk = document.getElementById('role-privacy-check');
@@ -1110,11 +1134,17 @@ export async function submitRoleSignup() {
 
   if (role === 'student') {
     const email = document.getElementById('reg-email')?.value.trim() || fbUser.email || 'student@media.eg';
+    const phone = document.getElementById('reg-phone')?.value.trim() || '';
     const dept = document.getElementById('reg-dept')?.value || 'إذاعة وتلفزيون';
     const gradYear = document.getElementById('reg-grad-year')?.value || '2027';
     const univ = document.getElementById('reg-univ')?.value.trim() || 'جامعة القاهرة';
     const studentId = `stud-${Date.now()}`;
     const joinedDate = new Date().toLocaleDateString('ar-EG');
+    const registeredAt = new Date().toLocaleString('ar-EG', {
+      timeZone: 'Africa/Cairo',
+      dateStyle: 'full',
+      timeStyle: 'short',
+    });
 
     state.currentUser = {
       id: studentId,
@@ -1122,6 +1152,7 @@ export async function submitRoleSignup() {
       role: 'student',
       name,
       email,
+      phone,
       department: dept,
       gradYear,
       university: univ,
@@ -1140,6 +1171,7 @@ export async function submitRoleSignup() {
       card_id: studentId,
       name,
       email,
+      phone,
       position: 'طالب إعلام',
       university: univ,
       department: dept,
@@ -1166,6 +1198,16 @@ export async function submitRoleSignup() {
 
     syncStudentRegistrationToCloud(newStudentRecord, state.totalPoints || 0).catch((err) => {
       console.error('Student Firestore sync error:', err);
+    });
+
+    sendAdminEmailNotification({
+      eventType: 'تسجيل جديد',
+      role: 'عميل (طالب / خريج)',
+      name,
+      email,
+      phone,
+      specialty: '',
+      registeredAt,
     });
 
   } else if (role === 'mentor') {
@@ -1309,8 +1351,30 @@ export async function submitRoleSignup() {
     navigateView('mentor-app');
     renderMentorsList();
 
+    const rawPhone =
+      document.getElementById('reg-phone')?.value.trim() ||
+      document.getElementById('reg-mentor-instapay-phone')?.value.trim() ||
+      document.getElementById('reg-mentor-wallet-phone')?.value.trim() ||
+      document.getElementById('reg-mentor-fawry-phone')?.value.trim() ||
+      '';
+    const registeredAt = new Date().toLocaleString('ar-EG', {
+      timeZone: 'Africa/Cairo',
+      dateStyle: 'full',
+      timeStyle: 'short',
+    });
+
     syncMentorRegistrationToCloud(newMentor, newVerif).catch((err) => {
       console.error('Mentor Firestore sync error:', err);
+    });
+
+    sendAdminEmailNotification({
+      eventType: 'تسجيل جديد / طلب جديد',
+      role: 'خبير (منتور)',
+      name,
+      email: mentorEmail,
+      phone: rawPhone,
+      specialty,
+      registeredAt,
     });
 
   } else if (role === 'company') {
@@ -1399,8 +1463,25 @@ export async function submitRoleSignup() {
     alert('⏳ تم تسجيل المؤسسة بنجاح!\n\nحساب المؤسسة الآن (قيد التوثيق والمراجعة) في السحابة. سيقوم مسؤولو المنصة بمراجعة السجل التجاري والموقع الرسمي.');
     navigateView('company-app');
 
+    const compPhone = document.getElementById('reg-phone')?.value.trim() || '';
+    const compRegisteredAt = new Date().toLocaleString('ar-EG', {
+      timeZone: 'Africa/Cairo',
+      dateStyle: 'full',
+      timeStyle: 'short',
+    });
+
     syncCompanyRegistrationToCloud(newCompanyRecord, newCompVerif).catch((err) => {
       console.error('Company Firestore sync error:', err);
+    });
+
+    sendAdminEmailNotification({
+      eventType: 'تسجيل جديد',
+      role: 'عميل (مؤسسة / شركة)',
+      name,
+      email,
+      phone: compPhone,
+      specialty: type || '',
+      registeredAt: compRegisteredAt,
     });
   }
 }
