@@ -60,6 +60,7 @@ export async function loadFromStorageEngine(state, INITIAL_DATA, checkAndApplyAu
 
     if (dataMap.currentUser) state.currentUser = dataMap.currentUser;
     if (dataMap.mentors && Array.isArray(dataMap.mentors) && dataMap.mentors.length > 0) state.mentors = dataMap.mentors;
+    if (dataMap.companies && Array.isArray(dataMap.companies)) state.companies = dataMap.companies;
     if (dataMap.students && Array.isArray(dataMap.students) && dataMap.students.length > 0) state.students = dataMap.students;
     if (dataMap.jobs && Array.isArray(dataMap.jobs) && dataMap.jobs.length > 0) state.jobs = dataMap.jobs;
     if (dataMap.applications && Array.isArray(dataMap.applications)) state.applications = dataMap.applications;
@@ -96,6 +97,7 @@ export async function saveToStorageEngine(state) {
   const payload = [
     { key: 'currentUser', value: state.currentUser },
     { key: 'mentors', value: state.mentors },
+    { key: 'companies', value: state.companies || [] },
     { key: 'students', value: state.students },
     { key: 'jobs', value: state.jobs },
     { key: 'applications', value: state.applications },

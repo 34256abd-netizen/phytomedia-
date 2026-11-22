@@ -115,6 +115,7 @@ export const state = {
   // Data collections
   mentors: [],
   students: [],
+  companies: [],
   jobs: [],
   applications: [],
   challenges: [],
@@ -911,8 +912,11 @@ export function submitRoleSignup() {
     const dept = document.getElementById('reg-dept')?.value || 'إذاعة وتلفزيون';
     const gradYear = document.getElementById('reg-grad-year')?.value || '2027';
     const univ = document.getElementById('reg-univ')?.value.trim() || 'جامعة القاهرة';
+    const studentId = `stud-${Date.now()}`;
+    const joinedDate = new Date().toLocaleDateString('ar-EG');
 
     state.currentUser = {
+      id: studentId,
       role: 'student',
       name,
       email,
@@ -920,12 +924,36 @@ export function submitRoleSignup() {
       gradYear,
       university: univ,
       status: 'active',
-      joinedAt: new Date().toLocaleDateString('ar-EG')
+      joinedAt: joinedDate
     };
 
     state.timaCard.name = name;
     state.timaCard.department = dept;
     state.timaCard.gradYear = gradYear;
+
+    if (!Array.isArray(state.students)) state.students = [];
+    const existingStudent = state.students.find(s =>
+      (email && s.email && s.email.toLowerCase() === email.toLowerCase()) ||
+      (s.name && s.name.trim() === name)
+    );
+    if (!existingStudent) {
+      state.students.unshift({
+        id: studentId,
+        card_id: studentId,
+        name,
+        email,
+        position: 'طالب إعلام',
+        university: univ,
+        department: dept,
+        gradYear,
+        overall: state.timaCard.overall || 0,
+        OVR: state.timaCard.overall || 0,
+        timaStats: { ...(state.timaCard.stats || {}) },
+        status: 'active',
+        works: (portfolioState && portfolioState.items) ? portfolioState.items.length : 0,
+        joinedAt: joinedDate
+      });
+    }
 
     saveToStorage();
     closeRoleSignup();
@@ -1097,6 +1125,7 @@ export function submitRoleSignup() {
     }
 
     const compId = `comp-${Date.now()}`;
+    const compJoinedDate = new Date().toLocaleDateString('ar-EG');
     state.currentUser = {
       id: compId,
       role: 'company',
@@ -1105,11 +1134,27 @@ export function submitRoleSignup() {
       email,
       website,
       needs,
+      commercialRegister: state.uploadedCompanyReg || '',
       status: 'pending_verification',
       verificationStatus: 'pending_verification',
       isVerified: false,
-      joinedAt: new Date().toLocaleDateString('ar-EG')
+      joinedAt: compJoinedDate
     };
+
+    if (!Array.isArray(state.companies)) state.companies = [];
+    state.companies.unshift({
+      id: compId,
+      name,
+      companyType: type,
+      email,
+      website,
+      needs,
+      commercialRegister: state.uploadedCompanyReg || '',
+      status: 'pending_verification',
+      verificationStatus: 'pending_verification',
+      isVerified: false,
+      joinedAt: compJoinedDate
+    });
 
     // Add to verifications table for Admin Approval
     state.verifications.unshift({
@@ -1122,7 +1167,7 @@ export function submitRoleSignup() {
       website: website,
       commercialRegister: state.uploadedCompanyReg,
       needs: needs,
-      date: new Date().toLocaleDateString('ar-EG'),
+      date: compJoinedDate,
       status: 'pending'
     });
 
@@ -2993,6 +3038,302 @@ export function getPendingVerificationsList() {
   return pending;
 }
 
+export function reconcileAllPlatformUsers() {
+  reconcileMentorsSource();
+  if (!Array.isArray(state.students)) state.students = [];
+  if (!Array.isArray(state.companies)) state.companies = [];
+  if (!Array.isArray(state.verifications)) state.verifications = [];
+
+  // 1. Reconcile currentUser if student or company
+  if (state.currentUser) {
+    const cu = state.currentUser;
+    if (cu.role === 'student') {
+      const exists = state.students.find(s =>
+        (cu.id && s.id === cu.id) ||
+        (cu.email && s.email && s.email.toLowerCase() === cu.email.toLowerCase()) ||
+        (cu.name && s.name === cu.name)
+      );
+      if (!exists && (cu.name || cu.email)) {
+        const sid = cu.id || `stud-curr-${Date.now()}`;
+        state.students.unshift({
+          id: sid,
+          card_id: sid,
+          name: cu.name || 'طالب إعلام',
+          email: cu.email || '',
+          position: 'طالب إعلام',
+          university: cu.university || 'جامعة القاهرة',
+          department: cu.department || 'إذاعة وتلفزيون',
+          gradYear: cu.gradYear || '2027',
+          overall: state.timaCard?.overall || 0,
+          OVR: state.timaCard?.overall || 0,
+          timaStats: { ...(state.timaCard?.stats || {}) },
+          status: cu.status || 'active',
+          works: (portfolioState && portfolioState.items) ? portfolioState.items.length : 0,
+          joinedAt: cu.joinedAt || new Date().toLocaleDateString('ar-EG')
+        });
+      }
+    } else if (cu.role === 'company') {
+      const exists = state.companies.find(c =>
+        (cu.id && c.id === cu.id) ||
+        (cu.email && c.email && c.email.toLowerCase() === cu.email.toLowerCase()) ||
+        (cu.name && c.name === cu.name)
+      );
+      if (!exists && (cu.name || cu.email)) {
+        state.companies.unshift({
+          id: cu.id || `comp-curr-${Date.now()}`,
+          name: cu.name || 'مؤسسة إعلامية',
+          companyType: cu.companyType || 'شركة انتاج',
+          email: cu.email || '',
+          website: cu.website || '',
+          needs: cu.needs || '',
+          commercialRegister: cu.commercialRegister || '',
+          status: cu.status || 'pending_verification',
+          verificationStatus: cu.verificationStatus || cu.status || 'pending_verification',
+          isVerified: Boolean(cu.isVerified),
+          joinedAt: cu.joinedAt || new Date().toLocaleDateString('ar-EG')
+        });
+      }
+    }
+  }
+
+  // 2. Reconcile companies from verifications & jobs
+  state.verifications.forEach(v => {
+    if (v && v.role === 'company') {
+      const exists = state.companies.find(c =>
+        (v.userId && c.id === v.userId) ||
+        (v.email && c.email && c.email.toLowerCase() === v.email.toLowerCase()) ||
+        (v.name && c.name === v.name)
+      );
+      if (!exists) {
+        const isVer = v.status === 'verified';
+        const isRej = v.status === 'rejected';
+        state.companies.unshift({
+          id: v.userId || `comp-${Date.now()}`,
+          name: v.name || 'مؤسسة إعلامية',
+          companyType: v.companyType || 'شركة انتاج',
+          email: v.email || '',
+          website: v.website || '',
+          needs: v.needs || '',
+          commercialRegister: v.commercialRegister || '',
+          status: isVer ? 'verified' : (isRej ? 'rejected' : 'pending_verification'),
+          verificationStatus: isVer ? 'verified' : (isRej ? 'rejected' : 'pending_verification'),
+          isVerified: isVer,
+          joinedAt: v.date || new Date().toLocaleDateString('ar-EG')
+        });
+      }
+    } else if (v && v.role === 'student') {
+      const exists = state.students.find(s =>
+        (v.userId && s.id === v.userId) ||
+        (v.email && s.email && s.email.toLowerCase() === v.email.toLowerCase()) ||
+        (v.name && s.name === v.name)
+      );
+      if (!exists && v.name) {
+        state.students.unshift({
+          id: v.userId || `stud-verif-${Date.now()}`,
+          name: v.name,
+          email: v.email || '',
+          position: 'طالب إعلام',
+          university: v.university || '',
+          department: v.specialty || '',
+          gradYear: '2027',
+          overall: 0,
+          OVR: 0,
+          status: v.status === 'rejected' ? 'frozen' : 'active',
+          works: 0,
+          joinedAt: v.date || new Date().toLocaleDateString('ar-EG')
+        });
+      }
+    }
+  });
+
+  // 3. Reconcile any company names from jobs if not yet listed in state.companies
+  if (Array.isArray(state.jobs)) {
+    state.jobs.forEach(job => {
+      const cname = (job && (job.company || job.companyName || '')).trim();
+      if (cname && !state.companies.some(c => c.name === cname)) {
+        state.companies.unshift({
+          id: `comp-job-${job.id || Date.now()}`,
+          name: cname,
+          companyType: 'مؤسسة معلنة',
+          email: '',
+          website: '',
+          needs: job.title || '',
+          status: 'verified',
+          verificationStatus: 'verified',
+          isVerified: true,
+          joinedAt: job.date || ''
+        });
+      }
+    });
+  }
+
+  // 4. Reconcile any student names from bookings/submissions/applications if not yet in state.students
+  const collectStudentName = (rawName, extraEmail) => {
+    const n = (rawName || '').trim();
+    if (!n) return;
+    const alreadyExists = state.students.some(s => s.name === n || (extraEmail && s.email && s.email.toLowerCase() === extraEmail.toLowerCase())) ||
+      state.mentors.some(m => (m.fullName || m.name) === n) ||
+      state.companies.some(c => c.name === n);
+    if (!alreadyExists) {
+      state.students.push({
+        id: `stud-act-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        name: n,
+        email: extraEmail || '',
+        position: 'طالب إعلام',
+        university: '',
+        department: '',
+        gradYear: '',
+        overall: 0,
+        OVR: 0,
+        status: 'active',
+        works: 0,
+        joinedAt: new Date().toLocaleDateString('ar-EG')
+      });
+    }
+  };
+
+  if (Array.isArray(state.bookings)) {
+    state.bookings.forEach(b => collectStudentName(b?.studentName, b?.studentEmail));
+  }
+  if (Array.isArray(state.submissions)) {
+    state.submissions.forEach(s => collectStudentName(s?.studentName, ''));
+  }
+  if (Array.isArray(state.applications)) {
+    state.applications.forEach(a => collectStudentName(a?.studentName, a?.studentEmail));
+  }
+
+  // Deduplicate students and companies by id
+  const seenStud = new Set();
+  state.students = state.students.filter(s => {
+    if (!s) return false;
+    const k = s.id || `${s.name}-${s.email}`;
+    if (seenStud.has(k)) return false;
+    seenStud.add(k);
+    return true;
+  });
+
+  const seenComp = new Set();
+  state.companies = state.companies.filter(c => {
+    if (!c) return false;
+    const k = c.id || `${c.name}-${c.email}`;
+    if (seenComp.has(k)) return false;
+    seenComp.add(k);
+    return true;
+  });
+}
+
+export function getAllPlatformPeople() {
+  reconcileAllPlatformUsers();
+  const people = [];
+
+  // Students
+  state.students.forEach(s => {
+    const isFrozen = s.status === 'frozen';
+    people.push({
+      id: s.id,
+      role: 'student',
+      roleLabel: 'طالب / خريج 🎓',
+      name: s.name || 'طالب بدون اسم',
+      email: s.email || '',
+      subInfo: `${s.department || 'إعلام'} • ${s.university || 'غير محدد'}`,
+      detailInfo: `OVR: ${s.OVR || s.overall || 0} • دفعة ${s.gradYear || '—'}`,
+      status: s.status || 'active',
+      isVerified: !isFrozen,
+      isFrozen,
+      isRejected: false,
+      joinedAt: s.joinedAt || '',
+      missingFields: (!s.email || !s.university || !s.department)
+        ? [
+            !s.email ? 'البريد الإلكتروني' : '',
+            !s.university ? 'الجامعة' : '',
+            !s.department ? 'القسم' : ''
+          ].filter(Boolean)
+        : [],
+      avatar: s.avatar || 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=400&q=80',
+      raw: s
+    });
+  });
+
+  // Mentors
+  state.mentors.forEach(m => {
+    const verif = state.verifications.find(v => v.role === 'mentor' && v.userId === m.id);
+    const isVerified = m.isVerified || m.status === 'verified' || m.verificationStatus === 'verified';
+    const isFrozen = m.status === 'frozen';
+    const isRejected = m.status === 'rejected' || m.verificationStatus === 'rejected';
+    people.push({
+      id: m.id,
+      role: 'mentor',
+      roleLabel: 'خبير / منتور 🧠',
+      name: m.fullName || m.name || 'خبير بدون اسم',
+      email: m.email || verif?.email || '',
+      subInfo: `${m.specialty || 'التخصص غير محدد'} • ${m.workplace || m.experience || 'جهة العمل غير محددة'}`,
+      detailInfo: m.price ? `سعر السيشن: ${m.price} ج.م` : 'سعر السيشن غير محدد',
+      status: m.status || 'pending_verification',
+      isVerified,
+      isFrozen,
+      isRejected,
+      joinedAt: m.joinedAt || verif?.date || '',
+      missingFields: getMentorMissingFields(m, verif),
+      avatar: m.image || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
+      raw: m
+    });
+  });
+
+  // Companies
+  state.companies.forEach(c => {
+    const isVerified = c.isVerified || c.status === 'verified' || c.verificationStatus === 'verified';
+    const isFrozen = c.status === 'frozen';
+    const isRejected = c.status === 'rejected' || c.verificationStatus === 'rejected';
+    const missing = [];
+    if (!c.email) missing.push('البريد المؤسسي');
+    if (!c.website) missing.push('الموقع الرسمي');
+    if (!c.commercialRegister) missing.push('السجل التجاري');
+    people.push({
+      id: c.id,
+      role: 'company',
+      roleLabel: 'مؤسسة / شركة 🏢',
+      name: c.name || 'مؤسسة بدون اسم',
+      email: c.email || '',
+      subInfo: `${c.companyType || 'مؤسسة إعلامية'}`,
+      detailInfo: c.website || c.needs || '—',
+      status: c.status || 'pending_verification',
+      isVerified,
+      isFrozen,
+      isRejected,
+      joinedAt: c.joinedAt || '',
+      missingFields: missing,
+      avatar: '',
+      raw: c
+    });
+  });
+
+  // Admin account (current or authenticated super admin)
+  if ((state.currentUser && state.currentUser.role === 'admin') || isAdminAuthenticated()) {
+    const adminUser = (state.currentUser && state.currentUser.role === 'admin')
+      ? state.currentUser
+      : { id: 'admin-super', name: 'المدير العام φ To Media', email: 'phytomedia10@gmail.com', joinedAt: '' };
+    people.push({
+      id: adminUser.id || 'admin-super',
+      role: 'admin',
+      roleLabel: 'إدارة المنظومة ⚙️',
+      name: adminUser.name || 'المدير العام φ To Media',
+      email: adminUser.email || 'phytomedia10@gmail.com',
+      subInfo: 'Super Admin • صلاحيات كاملة',
+      detailInfo: 'إدارة المنصة والتحكم المركزي',
+      status: 'active',
+      isVerified: true,
+      isFrozen: false,
+      isRejected: false,
+      joinedAt: adminUser.joinedAt || '',
+      missingFields: [],
+      avatar: '',
+      raw: adminUser
+    });
+  }
+
+  return people;
+}
+
 function renderMentorsList() {
   const container = document.getElementById('mentors-grid-student');
   if (!container) return;
@@ -4094,7 +4435,7 @@ export function copyAdminDashboardLink() {
 
 export function setAdminSubTab(tabName) {
   state.adminSubTab = tabName;
-  const tabs = ['overview', 'students', 'mentors', 'portfolio', 'challenges', 'company-requests', 'verifications', 'reports'];
+  const tabs = ['overview', 'all-users', 'students', 'mentors', 'portfolio', 'challenges', 'company-requests', 'verifications', 'reports'];
 
   tabs.forEach(t => {
     const btn = document.getElementById(`admin-tab-btn-${t}`);
@@ -4119,8 +4460,15 @@ export function setAdminSubTab(tabName) {
   window.lucide && window.lucide.createIcons();
 }
 
+export function openAllUsersWithFilter(roleFilter = 'all') {
+  const roleSelect = document.getElementById('admin-all-users-role-filter');
+  if (roleSelect) roleSelect.value = roleFilter;
+  setAdminSubTab('all-users');
+}
+
 export function renderAdminApp() {
-  const allMentors = reconcileMentorsSource();
+  const allPeople = getAllPlatformPeople();
+  const allMentors = state.mentors || [];
   const pendingVerifsList = getPendingVerificationsList();
 
   // Update 6 Live Statistics KPI Cards (same single source of truth as lists)
@@ -4128,6 +4476,7 @@ export function renderAdminApp() {
   const statMentors = document.getElementById('admin-stat-mentors-count');
   const statMentorsSub = document.getElementById('admin-stat-mentors-sublabel');
   const badgeMentors = document.getElementById('admin-badge-mentors-count');
+  const badgeAllUsers = document.getElementById('admin-badge-all-users-count');
   const statCompanies = document.getElementById('admin-stat-companies-count');
   const statPortfolio = document.getElementById('admin-stat-portfolio-count');
   const statChallenges = document.getElementById('admin-stat-challenges-count');
@@ -4145,6 +4494,7 @@ export function renderAdminApp() {
   if (statStudents) statStudents.innerText = `${totalStudents}`;
   if (statMentors) statMentors.innerText = `${totalMentors}`;
   if (badgeMentors) badgeMentors.innerText = `${totalMentors}`;
+  if (badgeAllUsers) badgeAllUsers.innerText = `${allPeople.length}`;
   if (statMentorsSub) {
     statMentorsSub.innerText = totalMentors > 0
       ? `موثق: ${verifiedMentors} • قيد التوثيق: ${pendingMentors} • اضغط للفتح ↗`
@@ -4177,7 +4527,9 @@ export function renderAdminApp() {
 
   // Render content according to active tab
   const activeTab = state.adminSubTab || 'overview';
-  if (activeTab === 'students') {
+  if (activeTab === 'all-users') {
+    renderAdminAllUsersTable();
+  } else if (activeTab === 'students') {
     renderAdminStudentsTable();
   } else if (activeTab === 'mentors') {
     renderAdminMentorsTable();
@@ -4655,6 +5007,248 @@ export function deleteAdminMentor(mentorId) {
   renderMentorsList();
 
   alert(`🗑️ تم حذف حساب الخبير (${mentorName}) نهائياً من المنظومة.`);
+}
+
+// -------------------------------------------------------------
+// TAB 2C: ALL PLATFORM PEOPLE DIRECTORY (كل الأشخاص بالمنصة)
+// -------------------------------------------------------------
+export function renderAdminAllUsersTable() {
+  const tbody = document.getElementById('admin-all-users-table-body');
+  const pillsContainer = document.getElementById('admin-all-users-role-pills');
+  const allPeople = getAllPlatformPeople();
+
+  if (pillsContainer) {
+    const studCount = allPeople.filter(p => p.role === 'student').length;
+    const mentorCount = allPeople.filter(p => p.role === 'mentor').length;
+    const compCount = allPeople.filter(p => p.role === 'company').length;
+    const adminCount = allPeople.filter(p => p.role === 'admin').length;
+
+    pillsContainer.innerHTML = `
+      <span class="px-3 py-1 rounded-full bg-[#1E1B4B] text-white">الإجمالي: ${allPeople.length}</span>
+      <span class="px-3 py-1 rounded-full bg-purple-100 text-[#7C3AED]">الطلبة: ${studCount}</span>
+      <span class="px-3 py-1 rounded-full bg-pink-100 text-[#EC4899]">الخبراء: ${mentorCount}</span>
+      <span class="px-3 py-1 rounded-full bg-indigo-100 text-indigo-700">المؤسسات: ${compCount}</span>
+      <span class="px-3 py-1 rounded-full bg-amber-100 text-amber-800">الإدارة: ${adminCount}</span>
+    `;
+  }
+
+  if (!tbody) return;
+
+  const searchQuery = (document.getElementById('admin-all-users-search')?.value || '').trim().toLowerCase();
+  const roleFilter = document.getElementById('admin-all-users-role-filter')?.value || 'all';
+  const statusFilter = document.getElementById('admin-all-users-status-filter')?.value || 'all';
+
+  let list = allPeople;
+
+  if (searchQuery) {
+    list = list.filter(p =>
+      (p.name && p.name.toLowerCase().includes(searchQuery)) ||
+      (p.email && p.email.toLowerCase().includes(searchQuery)) ||
+      (p.subInfo && p.subInfo.toLowerCase().includes(searchQuery)) ||
+      (p.detailInfo && p.detailInfo.toLowerCase().includes(searchQuery))
+    );
+  }
+
+  if (roleFilter !== 'all') {
+    list = list.filter(p => p.role === roleFilter);
+  }
+
+  if (statusFilter !== 'all') {
+    list = list.filter(p => {
+      if (statusFilter === 'active') return !p.isFrozen && !p.isRejected && p.isVerified;
+      if (statusFilter === 'pending') return !p.isFrozen && !p.isRejected && !p.isVerified;
+      if (statusFilter === 'frozen') return p.isFrozen || p.isRejected;
+      return true;
+    });
+  }
+
+  if (list.length === 0) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="6" class="p-8 text-center text-slate-400 font-bold bg-purple-50/20">
+          لا يوجد أشخاص مسجلون يطابقون البحث أو الفلتر الحالي.
+        </td>
+      </tr>
+    `;
+    return;
+  }
+
+  tbody.innerHTML = list.map(p => {
+    let roleBadgeClass = 'bg-purple-100 text-[#7C3AED]';
+    if (p.role === 'mentor') roleBadgeClass = 'bg-pink-100 text-[#EC4899]';
+    else if (p.role === 'company') roleBadgeClass = 'bg-indigo-100 text-indigo-700';
+    else if (p.role === 'admin') roleBadgeClass = 'bg-amber-100 text-amber-800';
+
+    let statusBadge = '';
+    if (p.isFrozen) {
+      statusBadge = `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-rose-100 text-rose-700 border border-rose-200">مجمد ⚠️</span>`;
+    } else if (p.isRejected) {
+      statusBadge = `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-slate-200 text-slate-700 border border-slate-300">مرفوض ✕</span>`;
+    } else if (p.isVerified) {
+      statusBadge = `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-emerald-100 text-emerald-800 border border-emerald-200">نشط وموثق ✓</span>`;
+    } else {
+      statusBadge = `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-amber-100 text-amber-800 border border-amber-200">قيد التوثيق ⏳</span>`;
+    }
+
+    let actionButtons = '';
+    if (p.role === 'student') {
+      actionButtons = `
+        <button onclick="window.phiApp.toggleStudentStatus('${p.id}')" class="px-3 py-1.5 rounded-xl font-bold text-xs cursor-pointer ${p.isFrozen ? 'bg-emerald-600 text-white' : 'bg-amber-100 text-amber-800'}">
+          ${p.isFrozen ? 'تفعيل ✓' : 'تجميد ⚠️'}
+        </button>
+        <button onclick="window.phiApp.confirmDeleteStudent('${p.id}')" title="حذف الطالب" class="p-1.5 rounded-xl bg-slate-100 hover:bg-rose-100 text-slate-500 hover:text-rose-700 cursor-pointer">
+          <i data-lucide="trash-2" class="w-4 h-4"></i>
+        </button>
+      `;
+    } else if (p.role === 'mentor') {
+      actionButtons = `
+        ${(!p.isVerified || p.isRejected) ? `
+          <button onclick="window.phiApp.approveMentorDirectly('${p.id}')" class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs cursor-pointer">
+            اعتماد ✓
+          </button>
+        ` : ''}
+        <button onclick="window.phiApp.toggleMentorStatus('${p.id}')" class="px-3 py-1.5 rounded-xl font-bold text-xs cursor-pointer ${p.isFrozen ? 'bg-purple-600 text-white' : 'bg-amber-100 text-amber-800'}">
+          ${p.isFrozen ? 'فك التجميد ✓' : 'تجميد ⚠️'}
+        </button>
+        <button onclick="window.phiApp.deleteAdminMentor('${p.id}')" title="حذف الخبير" class="p-1.5 rounded-xl bg-slate-100 hover:bg-rose-100 text-slate-500 hover:text-rose-700 cursor-pointer">
+          <i data-lucide="trash-2" class="w-4 h-4"></i>
+        </button>
+      `;
+    } else if (p.role === 'company') {
+      actionButtons = `
+        ${(!p.isVerified || p.isRejected) ? `
+          <button onclick="window.phiApp.approveCompanyDirectly('${p.id}')" class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs cursor-pointer">
+            اعتماد ✓
+          </button>
+        ` : ''}
+        <button onclick="window.phiApp.toggleCompanyStatus('${p.id}')" class="px-3 py-1.5 rounded-xl font-bold text-xs cursor-pointer ${p.isFrozen ? 'bg-purple-600 text-white' : 'bg-amber-100 text-amber-800'}">
+          ${p.isFrozen ? 'فك التجميد ✓' : 'تجميد ⚠️'}
+        </button>
+        <button onclick="window.phiApp.deleteAdminCompany('${p.id}')" title="حذف المؤسسة" class="p-1.5 rounded-xl bg-slate-100 hover:bg-rose-100 text-slate-500 hover:text-rose-700 cursor-pointer">
+          <i data-lucide="trash-2" class="w-4 h-4"></i>
+        </button>
+      `;
+    } else {
+      actionButtons = `<span class="text-[11px] font-bold text-purple-600">حساب الإدارة المحمي 🔒</span>`;
+    }
+
+    return `
+      <tr class="border-b border-purple-50 hover:bg-purple-50/40 transition-colors">
+        <td class="p-4">
+          <div class="flex items-center gap-3">
+            ${p.avatar ? `
+              <img src="${p.avatar}" alt="${p.name}" class="w-10 h-10 rounded-2xl object-cover border border-purple-200 shrink-0">
+            ` : `
+              <div class="w-10 h-10 rounded-2xl bg-gradient-to-tr from-[#7C3AED] to-[#EC4899] text-white font-black flex items-center justify-center shrink-0">
+                ${(p.name || '؟').slice(0, 1)}
+              </div>
+            `}
+            <div>
+              <div class="font-black text-[#1E1B4B] text-sm">${p.name}</div>
+              <div class="text-[11px] font-mono ${p.email ? 'text-[#7C3AED]' : 'text-rose-600 font-bold'}">
+                ${p.email || '⚠️ بدون بريد إلكتروني'}
+              </div>
+              ${p.joinedAt ? `<div class="text-[10px] text-slate-400 font-mono">${p.joinedAt}</div>` : ''}
+            </div>
+          </div>
+        </td>
+
+        <td class="p-4">
+          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black ${roleBadgeClass}">
+            ${p.roleLabel}
+          </span>
+        </td>
+
+        <td class="p-4">
+          <div class="font-bold text-slate-800">${p.subInfo}</div>
+        </td>
+
+        <td class="p-4 max-w-xs">
+          <div class="text-slate-600 font-medium">${p.detailInfo}</div>
+          ${p.missingFields && p.missingFields.length > 0 ? `
+            <div class="mt-1.5 p-2 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-[10px] font-bold">
+              ⚠️ ينقصه: ${p.missingFields.join(' • ')}
+            </div>
+          ` : ''}
+        </td>
+
+        <td class="p-4 text-center">
+          ${statusBadge}
+        </td>
+
+        <td class="p-4 text-center">
+          <div class="flex flex-wrap items-center justify-center gap-1.5">
+            ${actionButtons}
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+export function filterAdminAllUsers() {
+  renderAdminAllUsersTable();
+  window.lucide && window.lucide.createIcons();
+}
+
+export function approveCompanyDirectly(compId) {
+  reconcileAllPlatformUsers();
+  const comp = state.companies.find(c => c.id === compId);
+  if (!comp) return;
+
+  comp.status = 'verified';
+  comp.verificationStatus = 'verified';
+  comp.isVerified = true;
+
+  const verif = state.verifications.find(v => v.role === 'company' && v.userId === compId);
+  if (verif) verif.status = 'verified';
+
+  if (state.currentUser && state.currentUser.id === compId) {
+    state.currentUser.status = 'active';
+    state.currentUser.verificationStatus = 'verified';
+    state.currentUser.isVerified = true;
+  }
+
+  saveToStorage();
+  renderAdminApp();
+  renderAdminAllUsersTable();
+  renderAdminProtectionTab();
+  alert(`✓ تم اعتماد وتوثيق مؤسسة (${comp.name}) بنجاح!`);
+}
+
+export function toggleCompanyStatus(compId) {
+  const comp = (state.companies || []).find(c => c.id === compId);
+  if (!comp) return;
+
+  const willBeFrozen = comp.status !== 'frozen';
+  comp.status = willBeFrozen ? 'frozen' : (comp.isVerified ? 'verified' : 'pending_verification');
+
+  if (state.currentUser && state.currentUser.id === compId) {
+    state.currentUser.status = willBeFrozen ? 'frozen' : 'active';
+  }
+
+  saveToStorage();
+  renderAdminApp();
+  renderAdminAllUsersTable();
+  alert(willBeFrozen
+    ? `⚠️ تم تجميد حساب المؤسسة (${comp.name}) مؤقتاً.`
+    : `✓ تم فك التجميد وإعادة المؤسسة (${comp.name}) بنجاح.`
+  );
+}
+
+export function deleteAdminCompany(compId) {
+  const comp = (state.companies || []).find(c => c.id === compId);
+  if (!comp) return;
+  const compName = comp.name || 'المؤسسة';
+
+  state.companies = state.companies.filter(c => c.id !== compId);
+  state.verifications = state.verifications.filter(v => !(v.role === 'company' && v.userId === compId));
+  saveToStorage();
+
+  renderAdminApp();
+  renderAdminAllUsersTable();
+  renderAdminProtectionTab();
+  alert(`🗑️ تم حذف المؤسسة (${compName}) نهائياً من المنظومة.`);
 }
 
 // -------------------------------------------------------------
@@ -5174,6 +5768,7 @@ export function approveVerification(verifId) {
   saveToStorage();
   alert(`✓ تم اعتماد وتوثيق حساب (${targetName}) بنجاح!\nسيظهر الآن في قوائم المنصة للطلاب مع شارة "موثق ✓" باللون البنفسجي.`);
   renderAdminApp();
+  renderAdminAllUsersTable();
   renderAdminMentorsTable();
   renderAdminProtectionTab();
   renderMentorsList();
@@ -5195,9 +5790,19 @@ export function rejectVerification(verifId) {
     mentor.isVerified = false;
   }
 
+  if (state.companies && verif && verif.userId) {
+    const comp = state.companies.find(c => c.id === verif.userId);
+    if (comp) {
+      comp.status = 'rejected';
+      comp.verificationStatus = 'rejected';
+      comp.isVerified = false;
+    }
+  }
+
   saveToStorage();
   alert(`تم رفض طلب التوثيق لحساب (${targetName}).`);
   renderAdminApp();
+  renderAdminAllUsersTable();
   renderAdminMentorsTable();
   renderAdminProtectionTab();
   renderMentorsList();
@@ -5790,6 +6395,12 @@ export function setupGlobalFunctions() {
     copyAdminDashboardLink,
     renderAdminStudentsTable,
     filterAdminStudents,
+    renderAdminAllUsersTable,
+    filterAdminAllUsers,
+    openAllUsersWithFilter,
+    approveCompanyDirectly,
+    toggleCompanyStatus,
+    deleteAdminCompany,
     renderAdminMentorsTable,
     filterAdminMentors,
     approveMentorDirectly,

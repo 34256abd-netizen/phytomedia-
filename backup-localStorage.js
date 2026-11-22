@@ -6,6 +6,7 @@
 
 export const STORAGE_KEY_USER = 'phi_user_account_ecosystem_v1';
 export const STORAGE_KEY_MENTORS = 'phi_mentors_ecosystem_v1';
+export const STORAGE_KEY_COMPANIES = 'phi_companies_ecosystem_v1';
 export const STORAGE_KEY_JOBS = 'phi_jobs_ecosystem_v1';
 export const STORAGE_KEY_APPLICATIONS = 'phi_applications_ecosystem_v1';
 export const STORAGE_KEY_STUDENTS = 'phi_students_ecosystem_v1';
@@ -213,6 +214,17 @@ export function loadFromLocalStorage(state, INITIAL_DATA, checkAndApplyAutoBlock
     state.students = [];
   }
 
+  // Companies
+  const storedCompanies = localStorage.getItem(STORAGE_KEY_COMPANIES);
+  if (storedCompanies) {
+    try {
+      const parsed = JSON.parse(storedCompanies);
+      state.companies = Array.isArray(parsed) ? parsed : [];
+    } catch (e) { state.companies = []; }
+  } else {
+    state.companies = [];
+  }
+
   // Jobs
   const storedJobs = localStorage.getItem(STORAGE_KEY_JOBS);
   if (storedJobs) {
@@ -346,6 +358,7 @@ export function loadFromLocalStorage(state, INITIAL_DATA, checkAndApplyAutoBlock
 export function saveToLocalStorage(state) {
   if (state.currentUser) safeSetItem(STORAGE_KEY_USER, JSON.stringify(state.currentUser));
   safeSetItem(STORAGE_KEY_MENTORS, JSON.stringify(state.mentors));
+  safeSetItem(STORAGE_KEY_COMPANIES, JSON.stringify(state.companies || []));
   safeSetItem(STORAGE_KEY_STUDENTS, JSON.stringify(state.students));
   safeSetItem(STORAGE_KEY_JOBS, JSON.stringify(state.jobs));
   safeSetItem(STORAGE_KEY_APPLICATIONS, JSON.stringify(state.applications));
