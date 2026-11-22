@@ -1,0 +1,1385 @@
+import {
+  collection,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  onSnapshot,
+  query,
+  where,
+  serverTimestamp,
+  writeBatch,
+  Unsubscribe
+} from 'firebase/firestore';
+import { User } from 'firebase/auth';
+import {
+  db,
+  auth,
+  OperationType,
+  handleFirestoreError,
+  testConnection,
+  signInWithGooglePopup,
+  signOutFirebase,
+  subscribeAuthState
+} from './firebase';
+
+export const ADMIN_EMAILS = ['34256abd@gmail.com', 'phytomedia10@gmail.com'];
+
+export function isFirebaseAdminUser(user: User | null = auth.currentUser): boolean {
+  if (!user || !user.emailVerified || !user.email) return false;
+  return ADMIN_EMAILS.includes(user.email.trim().toLowerCase());
+}
+
+export function sanitizeId(raw: unknown, prefix = 'doc'): string {
+  const cleaned = String(raw || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_\-]/g, '_')
+    .slice(0, 120);
+  if (cleaned.length >= 1) return cleaned;
+  return `${prefix}-${Date.now()}`;
+}
+
+function clampStr(val: unknown, maxLen: number, fallback = ''): string {
+  const s = typeof val === 'string' ? val.trim() : String(val ?? '').trim();
+  if (!s) return fallback;
+  return s.length > maxLen ? s.slice(0, maxLen) : s;
+}
+
+function clampNum(val: unknown, min = 0, max = 100000, fallback = 0): number {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function clampMediaRef(val: unknown, maxLen = 150000, placeholder = '[مستند مرفق محفوظ محلياً]'): string {
+  if (typeof val !== 'string' || !val.trim()) return '';
+  if (val.length > maxLen) return placeholder;
+  return val;
+}
+
+function mergeById<T extends { id?: string }>(localList: T[], remoteList: T[], preferRemote = true): T[] {
+  const map = new Map<string, T>();
+  if (Array.isArray(localList)) {
+    for (const item of localList) {
+      if (item && item.id) map.set(String(item.id), item);
+    }
+  }
+  if (Array.isArray(remoteList)) {
+    for (const rItem of remoteList) {
+      if (!rItem || !rItem.id) continue;
+      const key = String(rItem.id);
+      const existing = map.get(key);
+      if (!existing || preferRemote) {
+        map.set(key, { ...(existing || {}), ...rItem });
+      } else {
+        map.set(key, { ...rItem, ...existing });
+      }
+    }
+  }
+  return Array.from(map.values());
+}
+
+export async function ensureGoogleAuth(): Promise<User> {
+  if (auth.currentUser && auth.currentUser.emailVerified) {
+    return auth.currentUser;
+  }
+  const user = await signInWithGooglePopup();
+  return user;
+}
+
+export async function forceGoogleSignIn(): Promise<User> {
+  return signInWithGooglePopup();
+}
+
+export async function firebaseSignOut(): Promise<void> {
+  await signOutFirebase();
+}
+
+export function getFirebaseAuthStateSnapshot() {
+  const u = auth.currentUser;
+  return {
+    isSignedIn: Boolean(u && u.emailVerified),
+    uid: u?.uid || null,
+    email: u?.email || null,
+    displayName: u?.displayName || null,
+    isAdmin: isFirebaseAdminUser(u)
+  };
+}
+
+let activeUnsubs: Unsubscribe[] = [];
+let publicUnsubs: Unsubscribe[] = [];
+let syncStateRef: any = null;
+let syncPortfolioRef: any = null;
+let onHydrateRef: (() => void) | null = null;
+let bootInitialized = false;
+
+function clearSubs(list: Unsubscribe[]) {
+  while (list.length > 0) {
+    const unsub = list.pop();
+    try {
+      if (typeof unsub === 'function') unsub();
+    } catch (_) {}
+  }
+}
+
+function triggerHydrate() {
+  if (typeof onHydrateRef === 'function') {
+    onHydrateRef();
+  }
+}
+
+function attachPublicListeners() {
+  clearSubs(publicUnsubs);
+
+  // 1. Public Mentors Directory (Zero PII)
+  try {
+    const qMentors = query(
+      collection(db, 'mentors_public'),
+      where('status', 'in', ['pending_verification', 'verified'])
+    );
+    publicUnsubs.push(
+      onSnapshot(
+        qMentors,
+        (snap) => {
+          if (!syncStateRef || isFirebaseAdminUser(auth.currentUser)) return;
+          const remoteMentors = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+          // Keep owner's private mentor record fields if present for current user's own mentor doc
+          const ownPrivate = (syncStateRef.mentors || []).filter(
+            (m: any) => m && auth.currentUser && m.ownerUid === auth.currentUser.uid
+          );
+          syncStateRef.mentors = mergeById(remoteMentors, ownPrivate, true);
+          triggerHydrate();
+        },
+        (err) => {
+          handleFirestoreError(err, OperationType.LIST, 'mentors_public');
+        }
+      )
+    );
+  } catch (err) {
+    console.warn('Could not attach mentors_public listener:', err);
+  }
+
+  // 2. Active Jobs
+  try {
+    const qJobs = query(collection(db, 'jobs'), where('status', '==', 'نشط'));
+    publicUnsubs.push(
+      onSnapshot(
+        qJobs,
+        (snap) => {
+          if (!syncStateRef || isFirebaseAdminUser(auth.currentUser)) return;
+          syncStateRef.jobs = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+          triggerHydrate();
+        },
+        (err) => {
+          handleFirestoreError(err, OperationType.LIST, 'jobs');
+        }
+      )
+    );
+  } catch (err) {
+    console.warn('Could not attach jobs listener:', err);
+  }
+
+  // 3. Active Challenges
+  try {
+    const qChallenges = query(collection(db, 'challenges'), where('status', '==', 'نشط'));
+    publicUnsubs.push(
+      onSnapshot(
+        qChallenges,
+        (snap) => {
+          if (!syncStateRef || isFirebaseAdminUser(auth.currentUser)) return;
+          syncStateRef.challenges = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+          triggerHydrate();
+        },
+        (err) => {
+          handleFirestoreError(err, OperationType.LIST, 'challenges');
+        }
+      )
+    );
+  } catch (err) {
+    console.warn('Could not attach challenges listener:', err);
+  }
+}
+
+function attachAdminListeners() {
+  clearSubs(publicUnsubs);
+  clearSubs(activeUnsubs);
+
+  const subscribeAdminCol = (colName: string, handler: (docs: any[]) => void) => {
+    const unsub = onSnapshot(
+      collection(db, colName),
+      (snap) => {
+        const items = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        handler(items);
+        triggerHydrate();
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.LIST, colName);
+      }
+    );
+    activeUnsubs.push(unsub);
+  };
+
+  subscribeAdminCol('students', (items) => {
+    if (!syncStateRef) return;
+    syncStateRef.students = items;
+  });
+
+  // Merge mentors_public and mentors (private PII) so admin has complete fields + email/idProof
+  let latestPublicMentors: any[] = [];
+  let latestPrivateMentors: any[] = [];
+  const mergeMentorsForAdmin = () => {
+    if (!syncStateRef) return;
+    syncStateRef.mentors = mergeById(latestPublicMentors, latestPrivateMentors, true);
+  };
+
+  subscribeAdminCol('mentors_public', (items) => {
+    latestPublicMentors = items;
+    mergeMentorsForAdmin();
+  });
+
+  subscribeAdminCol('mentors', (items) => {
+    latestPrivateMentors = items.map((m) => ({
+      ...m,
+      idProof: m.idProofRef || m.idProof || '',
+      syndicateCard: m.syndicateCardRef || m.syndicateCard || ''
+    }));
+    mergeMentorsForAdmin();
+  });
+
+  subscribeAdminCol('companies', (items) => {
+    if (!syncStateRef) return;
+    syncStateRef.companies = items;
+  });
+
+  subscribeAdminCol('verifications', (items) => {
+    if (!syncStateRef) return;
+    syncStateRef.verifications = items;
+  });
+
+  subscribeAdminCol('jobs', (items) => {
+    if (!syncStateRef) return;
+    syncStateRef.jobs = items;
+  });
+
+  subscribeAdminCol('applications', (items) => {
+    if (!syncStateRef) return;
+    syncStateRef.applications = items;
+  });
+
+  subscribeAdminCol('challenges', (items) => {
+    if (!syncStateRef) return;
+    syncStateRef.challenges = items;
+  });
+
+  subscribeAdminCol('submissions', (items) => {
+    if (!syncStateRef) return;
+    syncStateRef.submissions = items;
+  });
+
+  subscribeAdminCol('bookings', (items) => {
+    if (!syncStateRef) return;
+    syncStateRef.bookings = items;
+  });
+
+  subscribeAdminCol('reports', (items) => {
+    if (!syncStateRef) return;
+    syncStateRef.reports = items;
+  });
+
+  subscribeAdminCol('blacklist_ips', (items) => {
+    if (!syncStateRef) return;
+    syncStateRef.blacklistIps = items;
+  });
+
+  subscribeAdminCol('portfolio_items', (items) => {
+    if (!syncPortfolioRef) return;
+    syncPortfolioRef.items = items;
+  });
+}
+
+function attachOwnerListeners(user: User) {
+  clearSubs(activeUnsubs);
+  const uid = user.uid;
+
+  // User account doc
+  activeUnsubs.push(
+    onSnapshot(
+      doc(db, 'users', uid),
+      (snap) => {
+        if (!syncStateRef || !snap.exists()) return;
+        const uData = snap.data();
+        if (!syncStateRef.currentUser || syncStateRef.currentUser.uid === uid) {
+          syncStateRef.currentUser = {
+            ...(syncStateRef.currentUser || {}),
+            id: uData.profileId || uid,
+            uid,
+            role: uData.role,
+            name: uData.name,
+            email: uData.email,
+            status: uData.status,
+            joinedAt: uData.joinedAt || ''
+          };
+          triggerHydrate();
+        }
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.GET, `users/${uid}`);
+      }
+    )
+  );
+
+  // Own student record
+  activeUnsubs.push(
+    onSnapshot(
+      query(collection(db, 'students'), where('ownerUid', '==', uid)),
+      (snap) => {
+        if (!syncStateRef) return;
+        const items = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        if (items.length > 0) {
+          syncStateRef.students = mergeById(syncStateRef.students || [], items, true);
+          const mine: any = items[0];
+          if (!syncStateRef.currentUser || syncStateRef.currentUser.role === 'student') {
+            syncStateRef.currentUser = {
+              ...(syncStateRef.currentUser || {}),
+              id: mine.id,
+              uid,
+              role: 'student',
+              name: mine.name,
+              email: mine.email,
+              university: mine.university,
+              department: mine.department,
+              gradYear: mine.gradYear,
+              status: mine.status,
+              joinedAt: mine.joinedAt
+            };
+          }
+          if (mine.timaStats) {
+            syncStateRef.timaCard.stats = { ...syncStateRef.timaCard.stats, ...mine.timaStats };
+          }
+          if (mine.overall !== undefined) syncStateRef.timaCard.overall = mine.overall;
+          if (mine.totalPoints !== undefined) syncStateRef.totalPoints = mine.totalPoints;
+          if (mine.name) syncStateRef.timaCard.name = mine.name;
+          if (mine.department) syncStateRef.timaCard.department = mine.department;
+          if (mine.gradYear) syncStateRef.timaCard.gradYear = mine.gradYear;
+          triggerHydrate();
+        }
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'students')
+    )
+  );
+
+  // Active Students Talent Directory (Public, No PII)
+  activeUnsubs.push(
+    onSnapshot(
+      query(collection(db, 'students_public'), where('status', '==', 'active')),
+      (snap) => {
+        if (!syncStateRef) return;
+        const pub = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        syncStateRef.students = mergeById(syncStateRef.students || [], pub, false);
+        triggerHydrate();
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'students_public')
+    )
+  );
+
+  // Own mentor private record
+  activeUnsubs.push(
+    onSnapshot(
+      query(collection(db, 'mentors'), where('ownerUid', '==', uid)),
+      (snap) => {
+        if (!syncStateRef) return;
+        const items = snap.docs.map((d) => ({
+          ...d.data(),
+          id: d.id,
+          idProof: d.data().idProofRef || '',
+          syndicateCard: d.data().syndicateCardRef || ''
+        }));
+        if (items.length > 0) {
+          syncStateRef.mentors = mergeById(syncStateRef.mentors || [], items, true);
+          const mine: any = items[0];
+          if (!syncStateRef.currentUser || syncStateRef.currentUser.role === 'mentor') {
+            syncStateRef.currentUser = {
+              ...(syncStateRef.currentUser || {}),
+              ...mine,
+              id: mine.id,
+              uid,
+              role: 'mentor'
+            };
+          }
+          triggerHydrate();
+        }
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'mentors')
+    )
+  );
+
+  // Own company record
+  activeUnsubs.push(
+    onSnapshot(
+      query(collection(db, 'companies'), where('ownerUid', '==', uid)),
+      (snap) => {
+        if (!syncStateRef) return;
+        const items = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        if (items.length > 0) {
+          syncStateRef.companies = mergeById(syncStateRef.companies || [], items, true);
+          const mine: any = items[0];
+          if (!syncStateRef.currentUser || syncStateRef.currentUser.role === 'company') {
+            syncStateRef.currentUser = {
+              ...(syncStateRef.currentUser || {}),
+              ...mine,
+              id: mine.id,
+              uid,
+              role: 'company'
+            };
+          }
+          triggerHydrate();
+        }
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'companies')
+    )
+  );
+
+  // Own verifications
+  activeUnsubs.push(
+    onSnapshot(
+      query(collection(db, 'verifications'), where('ownerUid', '==', uid)),
+      (snap) => {
+        if (!syncStateRef) return;
+        const items = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        syncStateRef.verifications = mergeById(syncStateRef.verifications || [], items, true);
+        triggerHydrate();
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'verifications')
+    )
+  );
+
+  // Own bookings as student
+  activeUnsubs.push(
+    onSnapshot(
+      query(collection(db, 'bookings'), where('ownerUid', '==', uid)),
+      (snap) => {
+        if (!syncStateRef) return;
+        const items = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        syncStateRef.bookings = mergeById(syncStateRef.bookings || [], items, true);
+        triggerHydrate();
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'bookings')
+    )
+  );
+
+  // Own bookings as mentor
+  activeUnsubs.push(
+    onSnapshot(
+      query(collection(db, 'bookings'), where('mentorOwnerUid', '==', uid)),
+      (snap) => {
+        if (!syncStateRef) return;
+        const items = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        syncStateRef.bookings = mergeById(syncStateRef.bookings || [], items, true);
+        triggerHydrate();
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'bookings')
+    )
+  );
+
+  // Own submissions
+  activeUnsubs.push(
+    onSnapshot(
+      query(collection(db, 'submissions'), where('ownerUid', '==', uid)),
+      (snap) => {
+        if (!syncStateRef) return;
+        const items = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        syncStateRef.submissions = mergeById(syncStateRef.submissions || [], items, true);
+        triggerHydrate();
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'submissions')
+    )
+  );
+
+  // Own applications
+  activeUnsubs.push(
+    onSnapshot(
+      query(collection(db, 'applications'), where('ownerUid', '==', uid)),
+      (snap) => {
+        if (!syncStateRef) return;
+        const items = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        syncStateRef.applications = mergeById(syncStateRef.applications || [], items, true);
+        triggerHydrate();
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'applications')
+    )
+  );
+
+  // Own portfolio items
+  activeUnsubs.push(
+    onSnapshot(
+      query(collection(db, 'portfolio_items'), where('ownerUid', '==', uid)),
+      (snap) => {
+        if (!syncPortfolioRef) return;
+        const items = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+        syncPortfolioRef.items = mergeById(syncPortfolioRef.items || [], items, true);
+        triggerHydrate();
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'portfolio_items')
+    )
+  );
+}
+
+export function initFirebaseBridge(state: any, portfolioState: any, onHydrate: () => void) {
+  syncStateRef = state;
+  syncPortfolioRef = portfolioState;
+  onHydrateRef = onHydrate;
+
+  if (bootInitialized) return;
+  bootInitialized = true;
+
+  // Validate Firestore connection on initial boot
+  testConnection();
+
+  // Always listen to public non-PII catalogs (mentors_public, jobs, challenges)
+  attachPublicListeners();
+
+  // Attach user/admin listeners strictly when Firebase Auth state resolves
+  subscribeAuthState((user) => {
+    clearSubs(activeUnsubs);
+    if (!user || !user.emailVerified) {
+      attachPublicListeners();
+      triggerHydrate();
+      return;
+    }
+
+    if (isFirebaseAdminUser(user)) {
+      // Ensure admin view knows this Google account is verified super-admin
+      if (syncStateRef) {
+        sessionStorage.setItem('phi_admin_authenticated', 'true');
+        localStorage.setItem('phi_admin_authenticated', 'true');
+        if (!syncStateRef.currentUser || syncStateRef.currentUser.role === 'admin') {
+          syncStateRef.currentUser = {
+            id: 'admin-super',
+            uid: user.uid,
+            role: 'admin',
+            name: user.displayName || 'المدير العام φ To Media',
+            email: user.email || '34256abd@gmail.com',
+            status: 'active',
+            joinedAt: new Date().toLocaleDateString('ar-EG')
+          };
+        }
+      }
+      attachAdminListeners();
+    } else {
+      attachPublicListeners();
+      attachOwnerListeners(user);
+    }
+    triggerHydrate();
+  });
+}
+
+// -------------------------------------------------------------
+// FIRESTORE SYNC MUTATION HELPERS (Strictly Validated & Clamped)
+// -------------------------------------------------------------
+
+export async function syncStudentRegistrationToCloud(student: any, totalPoints = 0) {
+  const user = await ensureGoogleAuth();
+  const uid = sanitizeId(user.uid, 'uid');
+  const studentId = sanitizeId(student.id, 'stud');
+  const joinedAt = clampStr(student.joinedAt, 64, new Date().toLocaleDateString('ar-EG'));
+  const email = clampStr(student.email || user.email, 160);
+  const name = clampStr(student.name || user.displayName, 120, 'طالب إعلام');
+
+  const batch = writeBatch(db);
+
+  batch.set(doc(db, 'users', uid), {
+    uid,
+    profileId: studentId,
+    role: 'student',
+    name,
+    email,
+    status: 'active',
+    joinedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  batch.set(doc(db, 'students', studentId), {
+    id: studentId,
+    ownerUid: uid,
+    name,
+    email,
+    position: clampStr(student.position, 120, 'طالب إعلام'),
+    university: clampStr(student.university, 160, 'جامعة القاهرة'),
+    department: clampStr(student.department, 120, 'إذاعة وتلفزيون'),
+    gradYear: clampStr(student.gradYear, 16, '2027'),
+    overall: clampNum(student.overall, 0, 100, 0),
+    timaStats: student.timaStats || {},
+    totalPoints: clampNum(totalPoints, 0, 10000000, 0),
+    prestigeCount: 0,
+    customTheme: 'cosmic',
+    works: clampNum(student.works, 0, 10000, 0),
+    status: 'active',
+    joinedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  batch.set(doc(db, 'students_public', studentId), {
+    id: studentId,
+    ownerUid: uid,
+    name,
+    position: clampStr(student.position, 120, 'طالب إعلام'),
+    university: clampStr(student.university, 160, 'جامعة القاهرة'),
+    department: clampStr(student.department, 120, 'إذاعة وتلفزيون'),
+    gradYear: clampStr(student.gradYear, 16, '2027'),
+    overall: clampNum(student.overall, 0, 100, 0),
+    timaStats: student.timaStats || {},
+    works: clampNum(student.works, 0, 10000, 0),
+    status: 'active',
+    joinedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  try {
+    await batch.commit();
+    return uid;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `students/${studentId}`);
+  }
+}
+
+export async function syncAdminAddedStudentToCloud(student: any) {
+  const user = auth.currentUser;
+  if (!user || !isFirebaseAdminUser(user)) return;
+  const studentId = sanitizeId(student.id, 'stud');
+  const ownerUid = sanitizeId(user.uid, 'admin');
+  const joinedAt = clampStr(student.joinedAt, 64, new Date().toLocaleDateString('ar-EG'));
+  const batch = writeBatch(db);
+
+  batch.set(doc(db, 'students', studentId), {
+    id: studentId,
+    ownerUid,
+    name: clampStr(student.name, 120, 'طالب إعلام'),
+    email: clampStr(student.email, 160),
+    position: clampStr(student.position, 120, 'طالب إعلام'),
+    university: clampStr(student.university, 160, 'جامعة القاهرة'),
+    department: clampStr(student.department, 120, 'إذاعة وتلفزيون'),
+    gradYear: clampStr(student.gradYear, 16, '2027'),
+    overall: clampNum(student.overall, 0, 100, 90),
+    timaStats: student.timaStats || {},
+    totalPoints: 0,
+    prestigeCount: 0,
+    customTheme: 'cosmic',
+    works: clampNum(student.works, 0, 10000, 1),
+    status: 'active',
+    joinedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  batch.set(doc(db, 'students_public', studentId), {
+    id: studentId,
+    ownerUid,
+    name: clampStr(student.name, 120, 'طالب إعلام'),
+    position: clampStr(student.position, 120, 'طالب إعلام'),
+    university: clampStr(student.university, 160, 'جامعة القاهرة'),
+    department: clampStr(student.department, 120, 'إذاعة وتلفزيون'),
+    gradYear: clampStr(student.gradYear, 16, '2027'),
+    overall: clampNum(student.overall, 0, 100, 90),
+    timaStats: student.timaStats || {},
+    works: clampNum(student.works, 0, 10000, 1),
+    status: 'active',
+    joinedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  try {
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `students/${studentId}`);
+  }
+}
+
+export async function syncStudentProgressToCloud(studentId: string, patch: any) {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified || !studentId) return;
+  const sid = sanitizeId(studentId, 'stud');
+
+  try {
+    const ref = doc(db, 'students', sid);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return;
+
+    const allowedPrivate: Record<string, any> = { updatedAt: serverTimestamp() };
+    const allowedPublic: Record<string, any> = { updatedAt: serverTimestamp() };
+
+    if (patch.overall !== undefined) {
+      const ovr = clampNum(patch.overall, 0, 100, 0);
+      allowedPrivate.overall = ovr;
+      allowedPublic.overall = ovr;
+    }
+    if (patch.timaStats) {
+      allowedPrivate.timaStats = patch.timaStats;
+      allowedPublic.timaStats = patch.timaStats;
+    }
+    if (patch.totalPoints !== undefined) {
+      allowedPrivate.totalPoints = clampNum(patch.totalPoints, 0, 10000000, 0);
+    }
+    if (patch.works !== undefined) {
+      const w = clampNum(patch.works, 0, 10000, 0);
+      allowedPrivate.works = w;
+      allowedPublic.works = w;
+    }
+    if (patch.customTheme !== undefined) {
+      allowedPrivate.customTheme = clampStr(patch.customTheme, 40, 'cosmic');
+    }
+
+    const batch = writeBatch(db);
+    batch.update(ref, allowedPrivate);
+    batch.update(doc(db, 'students_public', sid), allowedPublic);
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `students/${sid}`);
+  }
+}
+
+export async function syncMentorRegistrationToCloud(mentor: any, verif: any) {
+  const user = await ensureGoogleAuth();
+  const uid = sanitizeId(user.uid, 'uid');
+  const mentorId = sanitizeId(mentor.id, 'mentor');
+  const verifId = sanitizeId(verif?.id || `verif-${mentorId}`, 'verif');
+  const joinedAt = clampStr(mentor.joinedAt, 64, new Date().toLocaleDateString('ar-EG'));
+  const email = clampStr(mentor.email || user.email, 160);
+  const name = clampStr(mentor.name || user.displayName, 120, 'خبير إعلامي');
+  const fullName = clampStr(mentor.fullName || name, 120);
+  const specialty = clampStr(mentor.specialty, 160, 'استشارات إعلامية');
+  const price = clampNum(mentor.price, 0, 100000, 200);
+  const payoutMethod = ['instapay', 'wallet', 'bank', 'fawry'].includes(mentor.payoutMethod)
+    ? mentor.payoutMethod
+    : 'instapay';
+  const acceptedMethods = Array.isArray(mentor.accepted_methods)
+    ? mentor.accepted_methods.slice(0, 10).map((x: unknown) => clampStr(x, 30))
+    : [payoutMethod];
+
+  const idProofRef = clampMediaRef(mentor.idProof, 150000);
+  const syndicateCardRef = clampMediaRef(mentor.syndicateCard, 150000);
+
+  const batch = writeBatch(db);
+
+  batch.set(doc(db, 'users', uid), {
+    uid,
+    profileId: mentorId,
+    role: 'mentor',
+    name,
+    email,
+    status: 'pending_verification',
+    joinedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  batch.set(doc(db, 'mentors_public', mentorId), {
+    id: mentorId,
+    ownerUid: uid,
+    name,
+    fullName,
+    specialty,
+    workplace: clampStr(mentor.workplace, 160),
+    experience: clampStr(mentor.experience, 240),
+    yearsExp: clampNum(mentor.yearsExp, 0, 80, 1),
+    portfolioLink: clampStr(mentor.portfolioLink || mentor.link, 500),
+    rating: clampStr(mentor.rating, 10, '5.0'),
+    price,
+    badge: clampStr(mentor.badge || specialty, 32),
+    image: clampStr(mentor.image, 500),
+    bio: clampStr(mentor.bio, 600),
+    meetLink: clampStr(mentor.meetLink, 300, 'https://meet.google.com/phi-mentor-direct'),
+    payoutMethod,
+    instapay_link: clampStr(mentor.instapay_link, 160),
+    accepted_methods: acceptedMethods,
+    reviewsList: [],
+    sessionsCount: 0,
+    status: 'pending_verification',
+    verificationStatus: 'pending_verification',
+    isVerified: false,
+    joinedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  batch.set(doc(db, 'mentors', mentorId), {
+    id: mentorId,
+    ownerUid: uid,
+    name,
+    fullName,
+    email,
+    specialty,
+    workplace: clampStr(mentor.workplace, 160),
+    experience: clampStr(mentor.experience, 240),
+    yearsExp: clampNum(mentor.yearsExp, 0, 80, 1),
+    price,
+    portfolioLink: clampStr(mentor.portfolioLink || mentor.link, 500),
+    payoutMethod,
+    instapay_link: clampStr(mentor.instapay_link, 160),
+    instapay_phone: clampStr(mentor.instapay_phone, 32),
+    wallet_phone: clampStr(mentor.wallet_phone, 32),
+    wallet_provider: clampStr(mentor.wallet_provider, 80),
+    bank_name: clampStr(mentor.bank_name, 120),
+    bank_iban: clampStr(mentor.bank_iban, 64),
+    bank_holder: clampStr(mentor.bank_holder, 120),
+    fawry_phone: clampStr(mentor.fawry_phone, 32),
+    accepted_methods: acceptedMethods,
+    idProofRef,
+    syndicateCardRef,
+    status: 'pending_verification',
+    verificationStatus: 'pending_verification',
+    isVerified: false,
+    earnings: 0,
+    sessionsCount: 0,
+    joinedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  batch.set(doc(db, 'verifications', verifId), {
+    id: verifId,
+    ownerUid: uid,
+    userId: mentorId,
+    name: fullName,
+    role: 'mentor',
+    specialty,
+    email,
+    workplace: clampStr(mentor.workplace, 160),
+    portfolioLink: clampStr(mentor.portfolioLink || mentor.link, 500),
+    payoutMethod,
+    idProof: idProofRef,
+    syndicateCard: syndicateCardRef,
+    date: joinedAt,
+    status: 'pending',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  try {
+    await batch.commit();
+    return uid;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `mentors/${mentorId}`);
+  }
+}
+
+export async function syncCompanyRegistrationToCloud(company: any, verif: any) {
+  const user = await ensureGoogleAuth();
+  const uid = sanitizeId(user.uid, 'uid');
+  const compId = sanitizeId(company.id, 'comp');
+  const verifId = sanitizeId(verif?.id || `verif-${compId}`, 'verif');
+  const joinedAt = clampStr(company.joinedAt, 64, new Date().toLocaleDateString('ar-EG'));
+  const email = clampStr(company.email || user.email, 160);
+  const name = clampStr(company.name, 160, 'مؤسسة إعلامية');
+  const commercialRegister = clampMediaRef(company.commercialRegister, 150000);
+
+  const batch = writeBatch(db);
+
+  batch.set(doc(db, 'users', uid), {
+    uid,
+    profileId: compId,
+    role: 'company',
+    name,
+    email,
+    status: 'pending_verification',
+    joinedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  batch.set(doc(db, 'companies', compId), {
+    id: compId,
+    ownerUid: uid,
+    name,
+    companyType: clampStr(company.companyType, 80, 'شركة انتاج'),
+    email,
+    website: clampStr(company.website, 300),
+    needs: clampStr(company.needs, 600),
+    commercialRegister,
+    status: 'pending_verification',
+    verificationStatus: 'pending_verification',
+    isVerified: false,
+    joinedAt,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  batch.set(doc(db, 'verifications', verifId), {
+    id: verifId,
+    ownerUid: uid,
+    userId: compId,
+    name,
+    role: 'company',
+    companyType: clampStr(company.companyType, 80, 'شركة انتاج'),
+    email,
+    website: clampStr(company.website, 300),
+    commercialRegister,
+    date: joinedAt,
+    status: 'pending',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  try {
+    await batch.commit();
+    return uid;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `companies/${compId}`);
+  }
+}
+
+export async function syncAdminEntityDecisionToCloud(
+  entityType: 'mentor' | 'company' | 'student',
+  entityId: string,
+  decision: 'verified' | 'rejected' | 'frozen' | 'active',
+  verifId?: string
+) {
+  const user = auth.currentUser;
+  if (!user || !isFirebaseAdminUser(user)) return;
+  const id = sanitizeId(entityId, entityType);
+  const batch = writeBatch(db);
+
+  if (entityType === 'mentor') {
+    const isVer = decision === 'verified';
+    const patch = {
+      status: decision,
+      verificationStatus: decision === 'frozen' ? 'frozen' : decision,
+      isVerified: isVer,
+      updatedAt: serverTimestamp()
+    };
+    const privRef = doc(db, 'mentors', id);
+    const pubRef = doc(db, 'mentors_public', id);
+    if ((await getDoc(privRef)).exists()) batch.update(privRef, patch);
+    if ((await getDoc(pubRef)).exists()) batch.update(pubRef, patch);
+
+    if (verifId && (decision === 'verified' || decision === 'rejected')) {
+      const vRef = doc(db, 'verifications', sanitizeId(verifId, 'verif'));
+      if ((await getDoc(vRef)).exists()) {
+        batch.update(vRef, { status: decision, updatedAt: serverTimestamp() });
+      }
+    }
+  } else if (entityType === 'company') {
+    const isVer = decision === 'verified';
+    const cRef = doc(db, 'companies', id);
+    if ((await getDoc(cRef)).exists()) {
+      batch.update(cRef, {
+        status: decision,
+        verificationStatus: decision,
+        isVerified: isVer,
+        updatedAt: serverTimestamp()
+      });
+    }
+    if (verifId && (decision === 'verified' || decision === 'rejected')) {
+      const vRef = doc(db, 'verifications', sanitizeId(verifId, 'verif'));
+      if ((await getDoc(vRef)).exists()) {
+        batch.update(vRef, { status: decision, updatedAt: serverTimestamp() });
+      }
+    }
+  } else if (entityType === 'student') {
+    const sRef = doc(db, 'students', id);
+    const spRef = doc(db, 'students_public', id);
+    const patch = { status: decision === 'frozen' ? 'frozen' : 'active', updatedAt: serverTimestamp() };
+    if ((await getDoc(sRef)).exists()) batch.update(sRef, patch);
+    if ((await getDoc(spRef)).exists()) batch.update(spRef, patch);
+  }
+
+  try {
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `${entityType}/${id}`);
+  }
+}
+
+export async function syncAdminDeleteEntityFromCloud(entityType: 'mentor' | 'company' | 'student', entityId: string) {
+  const user = auth.currentUser;
+  if (!user || !isFirebaseAdminUser(user)) return;
+  const id = sanitizeId(entityId, entityType);
+
+  try {
+    const batch = writeBatch(db);
+    if (entityType === 'mentor') {
+      batch.delete(doc(db, 'mentors', id));
+      batch.delete(doc(db, 'mentors_public', id));
+      batch.delete(doc(db, 'verifications', `verif-mentor-${id}`));
+    } else if (entityType === 'company') {
+      batch.delete(doc(db, 'companies', id));
+    } else if (entityType === 'student') {
+      batch.delete(doc(db, 'students', id));
+      batch.delete(doc(db, 'students_public', id));
+    }
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `${entityType}/${id}`);
+  }
+}
+
+export async function syncJobCreateToCloud(job: any) {
+  const user = await ensureGoogleAuth();
+  const jobId = sanitizeId(job.id, 'job');
+  try {
+    await setDoc(doc(db, 'jobs', jobId), {
+      id: jobId,
+      ownerUid: sanitizeId(user.uid, 'uid'),
+      title: clampStr(job.title, 160, 'فرصة تدريب'),
+      company: clampStr(job.company, 160, 'مؤسسة إعلامية'),
+      companyType: clampStr(job.companyType, 80, 'شركة انتاج'),
+      type: clampStr(job.type, 40, 'تدريب'),
+      minSkill: clampStr(job.minSkill, 40, 'filming'),
+      minScore: clampNum(job.minScore, 0, 100, 70),
+      description: clampStr(job.description, 1200),
+      location: clampStr(job.location, 120, 'القاهرة'),
+      stipend: clampStr(job.stipend, 120, 'مكافأة شهرية'),
+      applicantsCount: clampNum(job.applicantsCount, 0, 100000, 0),
+      status: 'نشط',
+      date: clampStr(job.date, 64, 'الآن'),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `jobs/${jobId}`);
+  }
+}
+
+export async function syncJobStatusUpdateToCloud(jobId: string, status: string) {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified) return;
+  const id = sanitizeId(jobId, 'job');
+  try {
+    const ref = doc(db, 'jobs', id);
+    if ((await getDoc(ref)).exists()) {
+      await updateDoc(ref, {
+        status: status === 'مغلق' ? 'مغلق' : 'نشط',
+        updatedAt: serverTimestamp()
+      });
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `jobs/${id}`);
+  }
+}
+
+export async function syncApplicationCreateToCloud(appItem: any, newApplicantsCount: number) {
+  const user = await ensureGoogleAuth();
+  const appId = sanitizeId(appItem.id, 'app');
+  const jobId = sanitizeId(appItem.jobId, 'job');
+
+  try {
+    const jobRef = doc(db, 'jobs', jobId);
+    const jobSnap = await getDoc(jobRef);
+    if (!jobSnap.exists()) return;
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'applications', appId), {
+      id: appId,
+      ownerUid: sanitizeId(user.uid, 'uid'),
+      jobId,
+      jobOwnerUid: sanitizeId(jobSnap.data()?.ownerUid || user.uid, 'uid'),
+      jobTitle: clampStr(appItem.jobTitle, 160),
+      studentId: sanitizeId(appItem.studentId || user.uid, 'stud'),
+      studentName: clampStr(appItem.studentName, 120, 'طالب إعلام'),
+      university: clampStr(appItem.university, 160),
+      department: clampStr(appItem.department, 120),
+      timaOverall: clampNum(appItem.timaOverall, 0, 100, 0),
+      skillHighlight: clampStr(appItem.skillHighlight, 80),
+      status: clampStr(appItem.status, 40, 'قيد المراجعة'),
+      appliedAt: clampStr(appItem.appliedAt, 64, 'الآن'),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    batch.update(jobRef, {
+      applicantsCount: clampNum(newApplicantsCount, 0, 100000, 1),
+      updatedAt: serverTimestamp()
+    });
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `applications/${appId}`);
+  }
+}
+
+export async function syncChallengeCreateToCloud(ch: any) {
+  const user = auth.currentUser;
+  if (!user || !isFirebaseAdminUser(user)) return;
+  const chId = sanitizeId(ch.id, 'ch');
+  try {
+    await setDoc(doc(db, 'challenges', chId), {
+      id: chId,
+      title: clampStr(ch.title, 160),
+      icon: clampStr(ch.icon, 40, 'trophy'),
+      points: clampNum(ch.points, 0, 100000, 300),
+      category: clampStr(ch.category, 80, 'مونتاج'),
+      description: clampStr(ch.description, 1200),
+      submissionsCount: clampNum(ch.submissionsCount, 0, 100000, 0),
+      status: 'نشط',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `challenges/${chId}`);
+  }
+}
+
+export async function syncChallengeDeleteToCloud(chId: string) {
+  const user = auth.currentUser;
+  if (!user || !isFirebaseAdminUser(user)) return;
+  const id = sanitizeId(chId, 'ch');
+  try {
+    await deleteDoc(doc(db, 'challenges', id));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `challenges/${id}`);
+  }
+}
+
+export async function syncBookingCreateToCloud(booking: any) {
+  const user = await ensureGoogleAuth();
+  const bookingId = sanitizeId(booking.id, 'book');
+  const mentorId = sanitizeId(booking.mentorId, 'mentor');
+
+  try {
+    const mentorSnap = await getDoc(doc(db, 'mentors_public', mentorId));
+    if (!mentorSnap.exists()) return;
+
+    await setDoc(doc(db, 'bookings', bookingId), {
+      id: bookingId,
+      ownerUid: sanitizeId(user.uid, 'uid'),
+      mentorId,
+      mentorOwnerUid: sanitizeId(mentorSnap.data()?.ownerUid || '', 'uid'),
+      mentorName: clampStr(booking.mentorName, 120),
+      studentName: clampStr(booking.studentName, 120),
+      day: clampStr(booking.day, 40),
+      time: clampStr(booking.time, 40),
+      question: clampStr(booking.question, 1000),
+      amount: clampNum(booking.amount, 0, 100000, 200),
+      meetLink: clampStr(booking.meetLink, 300),
+      status: clampStr(booking.status, 40, 'مدفوعة ومؤكدة'),
+      hasBeenRated: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `bookings/${bookingId}`);
+  }
+}
+
+export async function syncBookingRatingToCloud(
+  bookingId: string | undefined,
+  mentorId: string,
+  rating: number,
+  comment: string,
+  newAvgRating: string,
+  reviewsList: any[],
+  sessionsCount: number
+) {
+  const user = await ensureGoogleAuth();
+  const mid = sanitizeId(mentorId, 'mentor');
+
+  try {
+    const pubRef = doc(db, 'mentors_public', mid);
+    const pubSnap = await getDoc(pubRef);
+    const batch = writeBatch(db);
+    let hasWrites = false;
+
+    if (pubSnap.exists()) {
+      const sanitizedReviews = (Array.isArray(reviewsList) ? reviewsList : []).slice(0, 100).map((r) => ({
+        id: clampStr(r.id, 80, `rev-${Date.now()}`),
+        mentorId: mid,
+        studentName: clampStr(r.studentName, 120, 'طالب إعلام'),
+        rating: clampNum(r.rating, 1, 5, 5),
+        comment: clampStr(r.comment, 600),
+        date: clampStr(r.date, 64)
+      }));
+      batch.update(pubRef, {
+        rating: clampStr(newAvgRating, 10, '5.0'),
+        reviewsList: sanitizedReviews,
+        sessionsCount: clampNum(sessionsCount, 0, 100000, 1),
+        updatedAt: serverTimestamp()
+      });
+      hasWrites = true;
+    }
+
+    if (bookingId) {
+      const bid = sanitizeId(bookingId, 'book');
+      const bRef = doc(db, 'bookings', bid);
+      const bSnap = await getDoc(bRef);
+      if (bSnap.exists() && bSnap.data()?.ownerUid === user.uid) {
+        batch.update(bRef, {
+          hasBeenRated: true,
+          rating: clampNum(rating, 1, 5, 5),
+          comment: clampStr(comment, 600),
+          updatedAt: serverTimestamp()
+        });
+        hasWrites = true;
+      }
+    }
+
+    if (hasWrites) {
+      await batch.commit();
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `mentors_public/${mid}`);
+  }
+}
+
+export async function syncSubmissionCreateToCloud(sub: any, challengeSubmissionsCount?: number) {
+  const user = await ensureGoogleAuth();
+  const subId = sanitizeId(sub.id, 'sub');
+  const chId = sanitizeId(sub.challengeId, 'ch');
+  try {
+    await setDoc(doc(db, 'submissions', subId), {
+      id: subId,
+      ownerUid: sanitizeId(user.uid, 'uid'),
+      challengeId: chId,
+      studentName: clampStr(sub.studentName, 120, 'طالب إعلام'),
+      category: clampStr(sub.category, 80),
+      title: clampStr(sub.title, 200),
+      content: clampStr(sub.content, 8000),
+      link: clampStr(sub.link, 500),
+      score: clampNum(sub.score, 0, 100, 60),
+      requirements_met: Boolean(sub.requirements_met),
+      mistakes: Array.isArray(sub.mistakes) ? sub.mistakes.slice(0, 10).map((m: unknown) => clampStr(m, 400)) : [],
+      feedback: clampStr(sub.feedback, 2000),
+      skillArabic: clampStr(sub.skillArabic, 60),
+      skillDelta: clampNum(sub.skillDelta, -20, 20, 0),
+      newOvr: clampNum(sub.newOvr, 0, 100, 0),
+      date: clampStr(sub.date, 64),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+
+    if (typeof challengeSubmissionsCount === 'number') {
+      const chRef = doc(db, 'challenges', chId);
+      if ((await getDoc(chRef)).exists()) {
+        await updateDoc(chRef, {
+          submissionsCount: clampNum(challengeSubmissionsCount, 0, 100000, 1),
+          updatedAt: serverTimestamp()
+        });
+      }
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `submissions/${subId}`);
+  }
+}
+
+export async function syncReportCreateToCloud(report: any) {
+  const user = await ensureGoogleAuth();
+  const repId = sanitizeId(report.id, 'rep');
+  try {
+    await setDoc(doc(db, 'reports', repId), {
+      id: repId,
+      reporterUid: sanitizeId(user.uid, 'uid'),
+      reportedId: sanitizeId(report.reportedId, 'target'),
+      reportedName: clampStr(report.reportedName, 160),
+      reportedType: ['mentor', 'company', 'student'].includes(report.reportedType) ? report.reportedType : 'mentor',
+      reason: clampStr(report.reason, 120, 'حساب وهمي'),
+      description: clampStr(report.description, 1500),
+      screenshot: clampMediaRef(report.screenshot, 150000),
+      date: clampStr(report.date, 64),
+      status: 'pending',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `reports/${repId}`);
+  }
+}
+
+export async function syncReportActionToCloud(reportId: string, status: string) {
+  const user = auth.currentUser;
+  if (!user || !isFirebaseAdminUser(user)) return;
+  const repId = sanitizeId(reportId, 'rep');
+  try {
+    const ref = doc(db, 'reports', repId);
+    if ((await getDoc(ref)).exists()) {
+      await updateDoc(ref, {
+        status: ['pending', 'approved_banned', 'warned', 'rejected'].includes(status) ? status : 'pending',
+        updatedAt: serverTimestamp()
+      });
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `reports/${repId}`);
+  }
+}
+
+export async function syncBlacklistIpAddToCloud(item: any) {
+  const user = auth.currentUser;
+  if (!user || !isFirebaseAdminUser(user)) return;
+  const ipId = sanitizeId(item.id || item.ip, 'ip');
+  try {
+    await setDoc(doc(db, 'blacklist_ips', ipId), {
+      id: ipId,
+      ip: clampStr(item.ip, 64),
+      reason: clampStr(item.reason, 300),
+      date: clampStr(item.date, 64),
+      addedBy: clampStr(item.addedBy, 120, 'إدارة المنصة'),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `blacklist_ips/${ipId}`);
+  }
+}
+
+export async function syncBlacklistIpDeleteToCloud(ipIdOrIp: string) {
+  const user = auth.currentUser;
+  if (!user || !isFirebaseAdminUser(user)) return;
+  const ipId = sanitizeId(ipIdOrIp, 'ip');
+  try {
+    await deleteDoc(doc(db, 'blacklist_ips', ipId));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `blacklist_ips/${ipId}`);
+  }
+}
+
+export async function syncPortfolioItemCreateToCloud(item: any) {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified) return;
+  const itemId = sanitizeId(item.id, 'port');
+  try {
+    await setDoc(doc(db, 'portfolio_items', itemId), {
+      id: itemId,
+      ownerUid: sanitizeId(user.uid, 'uid'),
+      studentName: clampStr(item.studentName, 120),
+      title: clampStr(item.title, 200, 'عمل إعلامي'),
+      type: clampStr(item.type, 60, 'فيديو'),
+      date: clampStr(item.date, 64),
+      url: clampStr(item.url || item.link, 600),
+      description: clampStr(item.desc || item.description, 1000),
+      approvalStatus: 'pending',
+      views: clampNum(item.views, 0, 10000000, 1),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `portfolio_items/${itemId}`);
+  }
+}
+
+export async function syncPortfolioItemDecisionToCloud(itemId: string, approvalStatus: 'approved' | 'rejected') {
+  const user = auth.currentUser;
+  if (!user || !isFirebaseAdminUser(user)) return;
+  const id = sanitizeId(itemId, 'port');
+  try {
+    const ref = doc(db, 'portfolio_items', id);
+    if ((await getDoc(ref)).exists()) {
+      await updateDoc(ref, { approvalStatus, updatedAt: serverTimestamp() });
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `portfolio_items/${id}`);
+  }
+}
+
+export async function syncPortfolioItemDeleteFromCloud(itemId: string) {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified) return;
+  const id = sanitizeId(itemId, 'port');
+  try {
+    const ref = doc(db, 'portfolio_items', id);
+    if ((await getDoc(ref)).exists()) {
+      await deleteDoc(ref);
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, `portfolio_items/${id}`);
+  }
+}

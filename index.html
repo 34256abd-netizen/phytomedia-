@@ -405,6 +405,10 @@
 
         <!-- Logged Out Button -->
         <div id="nav-user-logged-out" class="flex items-center gap-2">
+          <button onclick="window.phiApp.loginWithGoogleQuick()" class="px-3.5 py-2.5 rounded-full bg-white hover:bg-purple-50 text-[#1E1B4B] border border-purple-200 font-bold text-xs shadow-sm transition-all flex items-center gap-1.5 cursor-pointer" title="استعادة حسابك وبياناتك من السحابة">
+            <i data-lucide="cloud" class="w-3.5 h-3.5 text-[#7C3AED]"></i>
+            <span>دخول Google</span>
+          </button>
           <button onclick="window.phiApp.startOnboarding()" class="px-5 py-2.5 rounded-full bg-gradient-to-r from-[#7C3AED] to-[#EC4899] hover:opacity-95 text-white font-black text-xs sm:text-sm shadow-lg shadow-pink-500/20 transition-all flex items-center gap-2 cursor-pointer">
             <span>ابدأ بناء عالمك الإعلامي</span>
             <i data-lucide="arrow-left" class="w-4 h-4"></i>
@@ -2071,7 +2075,7 @@
                 <i data-lucide="lock" class="w-3 h-3 text-[#EC4899]"></i>
                 <span>جلسة مشفرة ومحمية بكلمة مرور</span>
               </span>
-              <span class="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold flex items-center gap-1">
+              <span id="admin-cloud-sync-badge" class="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold flex items-center gap-1">
                 <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                 <span>النظام متصل ونشط</span>
               </span>
@@ -2088,6 +2092,10 @@
 
           <!-- Quick Actions & Share Link -->
           <div class="flex flex-wrap items-center gap-2.5 shrink-0">
+            <button id="admin-cloud-connect-btn" onclick="window.phiApp.loginAdminWithGoogle()" class="px-4 py-2.5 rounded-2xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 hover:text-white font-bold text-xs border border-emerald-400/40 shadow-md transition-all flex items-center gap-1.5 cursor-pointer">
+              <i data-lucide="cloud" class="w-4 h-4 text-emerald-300"></i>
+              <span>مزامنة السحابة عبر Google ☁️</span>
+            </button>
             <button onclick="window.phiApp.copyAdminDashboardLink()" class="px-4 py-2.5 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-bold text-xs border border-white/20 shadow-md transition-all flex items-center gap-2 cursor-pointer">
               <i data-lucide="copy" class="w-4 h-4 text-[#EC4899]"></i>
               <span>نسخ رابط لوحة الإدارة (#admin) 🔗</span>
@@ -2921,6 +2929,17 @@
           لوحة التحكم محجوبة بالكامل ومخصصة لإدارة المنظومة فقط. لا يمكن الدخول إلا بالحساب المصرح له رسمياً.
         </p>
 
+        <button type="button" onclick="window.phiApp.loginAdminWithGoogle()" class="w-full py-3 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer">
+          <i data-lucide="cloud" class="w-4 h-4"></i>
+          <span>دخول الإدارة السحابي عبر Google (مزامنة فورية) ☁️</span>
+        </button>
+
+        <div class="relative flex items-center justify-center">
+          <div class="border-t border-purple-100 w-full"></div>
+          <span class="px-2 bg-white text-[10px] font-bold text-slate-400 shrink-0">أو بكلمة مرور الإدارة</span>
+          <div class="border-t border-purple-100 w-full"></div>
+        </div>
+
         <div>
           <label class="block text-xs font-bold text-[#1E1B4B] mb-1">البريد الإلكتروني للإدارة *</label>
           <div class="relative">
@@ -2970,6 +2989,12 @@
 
       <!-- Form Body -->
       <div class="p-6 space-y-4">
+        <div id="signup-google-status-banner" class="p-3 rounded-2xl bg-purple-50 border border-purple-200 flex items-center justify-between gap-2 text-xs">
+          <span id="signup-google-status-text" class="font-bold text-[#1E1B4B]">ربط الحساب بـ Google لضمان المزامنة السحابية عبر الأجهزة ☁️</span>
+          <button type="button" onclick="window.phiApp.connectGoogleForSignup()" class="px-3 py-1.5 rounded-xl bg-white hover:bg-purple-100 text-[#7C3AED] border border-purple-200 font-black text-[11px] shrink-0 cursor-pointer">
+            ربط Google
+          </button>
+        </div>
         <div id="role-signup-form-body">
           <!-- Dynamically filled based on role -->
         </div>

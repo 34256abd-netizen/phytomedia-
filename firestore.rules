@@ -1,0 +1,800 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net - Default Deny All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ---------------------------------------------------------
+    // GLOBAL PRIMITIVES & IDENTITY HELPERS
+    // ---------------------------------------------------------
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedEmail() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedEmail() && (
+        request.auth.token.email == '34256abd@gmail.com' ||
+        request.auth.token.email == 'phytomedia10@gmail.com'
+      );
+    }
+
+    function isAdmin() {
+      return isVerifiedEmail() && (
+        isBootstrappedAdmin() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // ---------------------------------------------------------
+    // VALIDATION BLUEPRINTS (Strict Shape, Size & Type Checks)
+    // ---------------------------------------------------------
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'name', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'name', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidUserAccount(data) {
+      return data.keys().hasAll(['uid', 'profileId', 'role', 'name', 'email', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'profileId', 'role', 'name', 'email', 'status', 'joinedAt', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        isValidId(data.profileId) &&
+        data.role in ['student', 'mentor', 'company'] &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.status in ['active', 'pending_verification', 'frozen', 'rejected'] &&
+        (!('joinedAt' in data) || (data.joinedAt is string && data.joinedAt.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStudent(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'name', 'email', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'name', 'email', 'position', 'university', 'department',
+          'gradYear', 'overall', 'timaStats', 'totalPoints', 'prestigeCount',
+          'customTheme', 'works', 'status', 'joinedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.email is string && data.email.size() <= 160 &&
+        (!('position' in data) || (data.position is string && data.position.size() <= 120)) &&
+        (!('university' in data) || (data.university is string && data.university.size() <= 160)) &&
+        (!('department' in data) || (data.department is string && data.department.size() <= 120)) &&
+        (!('gradYear' in data) || (data.gradYear is string && data.gradYear.size() <= 16)) &&
+        (!('overall' in data) || (data.overall is number && data.overall >= 0 && data.overall <= 100)) &&
+        (!('timaStats' in data) || data.timaStats is map) &&
+        (!('totalPoints' in data) || (data.totalPoints is number && data.totalPoints >= 0)) &&
+        (!('prestigeCount' in data) || (data.prestigeCount is number && data.prestigeCount >= 0)) &&
+        (!('customTheme' in data) || (data.customTheme is string && data.customTheme.size() <= 40)) &&
+        (!('works' in data) || (data.works is number && data.works >= 0)) &&
+        data.status in ['active', 'frozen'] &&
+        (!('joinedAt' in data) || (data.joinedAt is string && data.joinedAt.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStudentPublic(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'name', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'name', 'position', 'university', 'department',
+          'gradYear', 'overall', 'timaStats', 'works', 'status', 'joinedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        (!('position' in data) || (data.position is string && data.position.size() <= 120)) &&
+        (!('university' in data) || (data.university is string && data.university.size() <= 160)) &&
+        (!('department' in data) || (data.department is string && data.department.size() <= 120)) &&
+        (!('gradYear' in data) || (data.gradYear is string && data.gradYear.size() <= 16)) &&
+        (!('overall' in data) || (data.overall is number && data.overall >= 0 && data.overall <= 100)) &&
+        (!('timaStats' in data) || data.timaStats is map) &&
+        (!('works' in data) || (data.works is number && data.works >= 0)) &&
+        data.status in ['active', 'frozen'] &&
+        (!('joinedAt' in data) || (data.joinedAt is string && data.joinedAt.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidMentorPrivate(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'name', 'fullName', 'email', 'specialty', 'price', 'status', 'isVerified', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'name', 'fullName', 'email', 'specialty', 'workplace',
+          'experience', 'yearsExp', 'price', 'portfolioLink', 'payoutMethod',
+          'instapay_link', 'instapay_phone', 'wallet_phone', 'wallet_provider',
+          'bank_name', 'bank_iban', 'bank_holder', 'fawry_phone', 'accepted_methods',
+          'idProofRef', 'syndicateCardRef', 'status', 'verificationStatus',
+          'isVerified', 'earnings', 'sessionsCount', 'joinedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        data.email is string && data.email.size() <= 160 &&
+        data.specialty is string && data.specialty.size() <= 160 &&
+        (!('workplace' in data) || (data.workplace is string && data.workplace.size() <= 160)) &&
+        (!('experience' in data) || (data.experience is string && data.experience.size() <= 240)) &&
+        (!('yearsExp' in data) || (data.yearsExp is number && data.yearsExp >= 0 && data.yearsExp <= 80)) &&
+        data.price is number && data.price >= 0 && data.price <= 100000 &&
+        (!('portfolioLink' in data) || (data.portfolioLink is string && data.portfolioLink.size() <= 500)) &&
+        (!('payoutMethod' in data) || data.payoutMethod in ['instapay', 'wallet', 'bank', 'fawry']) &&
+        (!('instapay_link' in data) || (data.instapay_link is string && data.instapay_link.size() <= 160)) &&
+        (!('instapay_phone' in data) || (data.instapay_phone is string && data.instapay_phone.size() <= 32)) &&
+        (!('wallet_phone' in data) || (data.wallet_phone is string && data.wallet_phone.size() <= 32)) &&
+        (!('wallet_provider' in data) || (data.wallet_provider is string && data.wallet_provider.size() <= 80)) &&
+        (!('bank_name' in data) || (data.bank_name is string && data.bank_name.size() <= 120)) &&
+        (!('bank_iban' in data) || (data.bank_iban is string && data.bank_iban.size() <= 64)) &&
+        (!('bank_holder' in data) || (data.bank_holder is string && data.bank_holder.size() <= 120)) &&
+        (!('fawry_phone' in data) || (data.fawry_phone is string && data.fawry_phone.size() <= 32)) &&
+        (!('accepted_methods' in data) || (data.accepted_methods is list && data.accepted_methods.size() <= 10 && (data.accepted_methods.size() == 0 || data.accepted_methods[0] is string))) &&
+        (!('idProofRef' in data) || (data.idProofRef is string && data.idProofRef.size() <= 200000)) &&
+        (!('syndicateCardRef' in data) || (data.syndicateCardRef is string && data.syndicateCardRef.size() <= 200000)) &&
+        data.status in ['pending_verification', 'verified', 'rejected', 'frozen'] &&
+        (!('verificationStatus' in data) || data.verificationStatus in ['pending_verification', 'verified', 'rejected', 'frozen']) &&
+        data.isVerified is bool &&
+        (!('earnings' in data) || (data.earnings is number && data.earnings >= 0)) &&
+        (!('sessionsCount' in data) || (data.sessionsCount is number && data.sessionsCount >= 0)) &&
+        (!('joinedAt' in data) || (data.joinedAt is string && data.joinedAt.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidMentorPublic(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'name', 'fullName', 'specialty', 'price', 'status', 'isVerified', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'name', 'fullName', 'specialty', 'workplace', 'experience',
+          'yearsExp', 'portfolioLink', 'rating', 'price', 'badge', 'image', 'bio',
+          'meetLink', 'payoutMethod', 'instapay_link', 'accepted_methods', 'reviewsList',
+          'sessionsCount', 'status', 'verificationStatus', 'isVerified', 'joinedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        data.specialty is string && data.specialty.size() <= 160 &&
+        (!('workplace' in data) || (data.workplace is string && data.workplace.size() <= 160)) &&
+        (!('experience' in data) || (data.experience is string && data.experience.size() <= 240)) &&
+        (!('yearsExp' in data) || (data.yearsExp is number && data.yearsExp >= 0 && data.yearsExp <= 80)) &&
+        (!('portfolioLink' in data) || (data.portfolioLink is string && data.portfolioLink.size() <= 500)) &&
+        (!('rating' in data) || (data.rating is string && data.rating.size() <= 10)) &&
+        data.price is number && data.price >= 0 && data.price <= 100000 &&
+        (!('badge' in data) || (data.badge is string && data.badge.size() <= 32)) &&
+        (!('image' in data) || (data.image is string && data.image.size() <= 500)) &&
+        (!('bio' in data) || (data.bio is string && data.bio.size() <= 600)) &&
+        (!('meetLink' in data) || (data.meetLink is string && data.meetLink.size() <= 300)) &&
+        (!('payoutMethod' in data) || data.payoutMethod in ['instapay', 'wallet', 'bank', 'fawry']) &&
+        (!('instapay_link' in data) || (data.instapay_link is string && data.instapay_link.size() <= 160)) &&
+        (!('accepted_methods' in data) || (data.accepted_methods is list && data.accepted_methods.size() <= 10 && (data.accepted_methods.size() == 0 || data.accepted_methods[0] is string))) &&
+        (!('reviewsList' in data) || (data.reviewsList is list && data.reviewsList.size() <= 100 && (data.reviewsList.size() == 0 || data.reviewsList[0] is map))) &&
+        (!('sessionsCount' in data) || (data.sessionsCount is number && data.sessionsCount >= 0)) &&
+        data.status in ['pending_verification', 'verified', 'rejected', 'frozen'] &&
+        (!('verificationStatus' in data) || data.verificationStatus in ['pending_verification', 'verified', 'rejected', 'frozen']) &&
+        data.isVerified is bool &&
+        (!('joinedAt' in data) || (data.joinedAt is string && data.joinedAt.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCompany(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'name', 'companyType', 'email', 'status', 'isVerified', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'name', 'companyType', 'email', 'website', 'needs',
+          'commercialRegister', 'status', 'verificationStatus', 'isVerified',
+          'joinedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
+        data.companyType is string && data.companyType.size() <= 80 &&
+        data.email is string && data.email.size() <= 160 &&
+        (!('website' in data) || (data.website is string && data.website.size() <= 300)) &&
+        (!('needs' in data) || (data.needs is string && data.needs.size() <= 600)) &&
+        (!('commercialRegister' in data) || (data.commercialRegister is string && data.commercialRegister.size() <= 200000)) &&
+        data.status in ['pending_verification', 'verified', 'rejected', 'frozen'] &&
+        (!('verificationStatus' in data) || data.verificationStatus in ['pending_verification', 'verified', 'rejected', 'frozen']) &&
+        data.isVerified is bool &&
+        (!('joinedAt' in data) || (data.joinedAt is string && data.joinedAt.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidVerification(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'userId', 'name', 'role', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'userId', 'name', 'role', 'specialty', 'companyType',
+          'email', 'workplace', 'portfolioLink', 'website', 'payoutMethod',
+          'idProof', 'syndicateCard', 'commercialRegister', 'date', 'status',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        isValidId(data.userId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
+        data.role in ['mentor', 'company', 'student'] &&
+        (!('specialty' in data) || (data.specialty is string && data.specialty.size() <= 160)) &&
+        (!('companyType' in data) || (data.companyType is string && data.companyType.size() <= 80)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 160)) &&
+        (!('workplace' in data) || (data.workplace is string && data.workplace.size() <= 160)) &&
+        (!('portfolioLink' in data) || (data.portfolioLink is string && data.portfolioLink.size() <= 500)) &&
+        (!('website' in data) || (data.website is string && data.website.size() <= 300)) &&
+        (!('payoutMethod' in data) || (data.payoutMethod is string && data.payoutMethod.size() <= 40)) &&
+        (!('idProof' in data) || (data.idProof is string && data.idProof.size() <= 200000)) &&
+        (!('syndicateCard' in data) || (data.syndicateCard is string && data.syndicateCard.size() <= 200000)) &&
+        (!('commercialRegister' in data) || (data.commercialRegister is string && data.commercialRegister.size() <= 200000)) &&
+        (!('date' in data) || (data.date is string && data.date.size() <= 64)) &&
+        data.status in ['pending', 'verified', 'rejected'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidJob(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'title', 'company', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'title', 'company', 'companyType', 'type', 'minSkill',
+          'minScore', 'description', 'location', 'stipend', 'applicantsCount',
+          'status', 'date', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
+        data.company is string && data.company.size() >= 1 && data.company.size() <= 160 &&
+        (!('companyType' in data) || (data.companyType is string && data.companyType.size() <= 80)) &&
+        (!('type' in data) || (data.type is string && data.type.size() <= 40)) &&
+        (!('minSkill' in data) || (data.minSkill is string && data.minSkill.size() <= 40)) &&
+        (!('minScore' in data) || (data.minScore is number && data.minScore >= 0 && data.minScore <= 100)) &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1200)) &&
+        (!('location' in data) || (data.location is string && data.location.size() <= 120)) &&
+        (!('stipend' in data) || (data.stipend is string && data.stipend.size() <= 120)) &&
+        (!('applicantsCount' in data) || (data.applicantsCount is number && data.applicantsCount >= 0)) &&
+        data.status in ['نشط', 'مغلق'] &&
+        (!('date' in data) || (data.date is string && data.date.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidApplication(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'jobId', 'jobTitle', 'studentName', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'jobId', 'jobOwnerUid', 'jobTitle', 'studentId',
+          'studentName', 'university', 'department', 'timaOverall',
+          'skillHighlight', 'status', 'appliedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        isValidId(data.jobId) &&
+        (!('jobOwnerUid' in data) || isValidId(data.jobOwnerUid)) &&
+        data.jobTitle is string && data.jobTitle.size() >= 1 && data.jobTitle.size() <= 160 &&
+        (!('studentId' in data) || (data.studentId is string && data.studentId.size() <= 128)) &&
+        data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 120 &&
+        (!('university' in data) || (data.university is string && data.university.size() <= 160)) &&
+        (!('department' in data) || (data.department is string && data.department.size() <= 120)) &&
+        (!('timaOverall' in data) || (data.timaOverall is number && data.timaOverall >= 0 && data.timaOverall <= 100)) &&
+        (!('skillHighlight' in data) || (data.skillHighlight is string && data.skillHighlight.size() <= 80)) &&
+        data.status is string && data.status.size() <= 40 &&
+        (!('appliedAt' in data) || (data.appliedAt is string && data.appliedAt.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidChallenge(data) {
+      return data.keys().hasAll(['id', 'title', 'points', 'category', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'title', 'icon', 'points', 'category', 'description',
+          'submissionsCount', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
+        (!('icon' in data) || (data.icon is string && data.icon.size() <= 40)) &&
+        data.points is number && data.points >= 0 && data.points <= 100000 &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 80 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1200)) &&
+        (!('submissionsCount' in data) || (data.submissionsCount is number && data.submissionsCount >= 0)) &&
+        data.status in ['نشط', 'مغلق'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSubmission(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'challengeId', 'studentName', 'title', 'score', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'challengeId', 'studentName', 'category', 'title',
+          'content', 'link', 'score', 'requirements_met', 'mistakes', 'feedback',
+          'skillArabic', 'skillDelta', 'newOvr', 'date', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        isValidId(data.challengeId) &&
+        data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 120 &&
+        (!('category' in data) || (data.category is string && data.category.size() <= 80)) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        (!('content' in data) || (data.content is string && data.content.size() <= 8000)) &&
+        (!('link' in data) || (data.link is string && data.link.size() <= 500)) &&
+        data.score is number && data.score >= 0 && data.score <= 100 &&
+        (!('requirements_met' in data) || data.requirements_met is bool) &&
+        (!('mistakes' in data) || (data.mistakes is list && data.mistakes.size() <= 10 && (data.mistakes.size() == 0 || data.mistakes[0] is string))) &&
+        (!('feedback' in data) || (data.feedback is string && data.feedback.size() <= 2000)) &&
+        (!('skillArabic' in data) || (data.skillArabic is string && data.skillArabic.size() <= 60)) &&
+        (!('skillDelta' in data) || data.skillDelta is number) &&
+        (!('newOvr' in data) || (data.newOvr is number && data.newOvr >= 0 && data.newOvr <= 100)) &&
+        (!('date' in data) || (data.date is string && data.date.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidBooking(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'mentorId', 'mentorName', 'studentName', 'day', 'time', 'amount', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'mentorId', 'mentorOwnerUid', 'mentorName', 'studentName',
+          'day', 'time', 'question', 'amount', 'meetLink', 'status',
+          'hasBeenRated', 'rating', 'comment', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        isValidId(data.mentorId) &&
+        (!('mentorOwnerUid' in data) || (data.mentorOwnerUid is string && data.mentorOwnerUid.size() <= 128)) &&
+        data.mentorName is string && data.mentorName.size() >= 1 && data.mentorName.size() <= 120 &&
+        data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 120 &&
+        data.day is string && data.day.size() <= 40 &&
+        data.time is string && data.time.size() <= 40 &&
+        (!('question' in data) || (data.question is string && data.question.size() <= 1000)) &&
+        data.amount is number && data.amount >= 0 && data.amount <= 100000 &&
+        (!('meetLink' in data) || (data.meetLink is string && data.meetLink.size() <= 300)) &&
+        data.status is string && data.status.size() <= 40 &&
+        (!('hasBeenRated' in data) || data.hasBeenRated is bool) &&
+        (!('rating' in data) || (data.rating is number && data.rating >= 1 && data.rating <= 5)) &&
+        (!('comment' in data) || (data.comment is string && data.comment.size() <= 600)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidReport(data) {
+      return data.keys().hasAll(['id', 'reporterUid', 'reportedId', 'reportedType', 'reason', 'description', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'reporterUid', 'reportedId', 'reportedName', 'reportedType',
+          'reason', 'description', 'screenshot', 'date', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.reporterUid) &&
+        isValidId(data.reportedId) &&
+        (!('reportedName' in data) || (data.reportedName is string && data.reportedName.size() <= 160)) &&
+        data.reportedType in ['mentor', 'company', 'student'] &&
+        data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 120 &&
+        data.description is string && data.description.size() >= 1 && data.description.size() <= 1500 &&
+        (!('screenshot' in data) || (data.screenshot is string && data.screenshot.size() <= 150000)) &&
+        (!('date' in data) || (data.date is string && data.date.size() <= 64)) &&
+        data.status in ['pending', 'approved_banned', 'warned', 'rejected'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidBlacklistIp(data) {
+      return data.keys().hasAll(['id', 'ip', 'reason', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ip', 'reason', 'date', 'addedBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.ip is string && data.ip.size() >= 1 && data.ip.size() <= 64 &&
+        data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 300 &&
+        (!('date' in data) || (data.date is string && data.date.size() <= 64)) &&
+        (!('addedBy' in data) || (data.addedBy is string && data.addedBy.size() <= 120)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPortfolioItem(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'title', 'type', 'approvalStatus', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'studentName', 'title', 'type', 'date', 'url',
+          'description', 'approvalStatus', 'views', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerUid) &&
+        (!('studentName' in data) || (data.studentName is string && data.studentName.size() <= 120)) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        data.type is string && data.type.size() >= 1 && data.type.size() <= 60 &&
+        (!('date' in data) || (data.date is string && data.date.size() <= 64)) &&
+        (!('url' in data) || (data.url is string && data.url.size() <= 600)) &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1000)) &&
+        data.approvalStatus in ['pending', 'approved', 'rejected'] &&
+        (!('views' in data) || (data.views is number && data.views >= 0)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // ---------------------------------------------------------
+    // 1. ADMINS COLLECTION
+    // ---------------------------------------------------------
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(adminId) && isBootstrappedAdmin() && isValidAdminUser(incoming()) && incoming().createdAt == request.time;
+      allow update: if isValidId(adminId) && isBootstrappedAdmin() && isValidAdminUser(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if isValidId(adminId) && isBootstrappedAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 2. USERS ROOT COLLECTION (Strict PII + Immutable Role)
+    // ---------------------------------------------------------
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+      allow create: if isValidId(userId) && isVerifiedEmail() && isOwner(userId) &&
+        isValidUserAccount(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().status in ['active', 'pending_verification'] &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isVerifiedEmail() &&
+        isValidUserAccount(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().role == existing().role &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 3. STUDENTS PRIVATE (PII: Email, Full Profile)
+    // ---------------------------------------------------------
+    match /students/{studentId} {
+      allow get: if isValidId(studentId) && ((isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(studentId) && isVerifiedEmail() &&
+        isValidStudent(incoming()) &&
+        (isAdmin() || (incoming().ownerUid == request.auth.uid && incoming().status == 'active')) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(studentId) && isVerifiedEmail() &&
+        isValidStudent(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().ownerUid == request.auth.uid && existing().status != 'frozen' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'position', 'university', 'department', 'gradYear',
+              'overall', 'timaStats', 'totalPoints', 'prestigeCount',
+              'customTheme', 'works', 'updatedAt'
+            ]))
+        );
+      allow delete: if isValidId(studentId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 4. STUDENTS PUBLIC (No PII - Safe for Talent Search)
+    // ---------------------------------------------------------
+    match /students_public/{studentId} {
+      allow get: if isValidId(studentId) && (existing().status == 'active' || (isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
+      allow list: if existing().status == 'active' || isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(studentId) && isVerifiedEmail() &&
+        isValidStudentPublic(incoming()) &&
+        (isAdmin() || (incoming().ownerUid == request.auth.uid && incoming().status == 'active')) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(studentId) && isVerifiedEmail() &&
+        isValidStudentPublic(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().ownerUid == request.auth.uid && existing().status != 'frozen' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'position', 'university', 'department', 'gradYear',
+              'overall', 'timaStats', 'works', 'updatedAt'
+            ]))
+        );
+      allow delete: if isValidId(studentId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 5. MENTORS PRIVATE (PII: Email, Payout Phones, IBAN, ID Refs)
+    // ---------------------------------------------------------
+    match /mentors/{mentorId} {
+      allow get: if isValidId(mentorId) && ((isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(mentorId) && isVerifiedEmail() &&
+        isValidMentorPrivate(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().status == 'pending_verification' &&
+        incoming().isVerified == false &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(mentorId) && isVerifiedEmail() &&
+        isValidMentorPrivate(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().ownerUid == request.auth.uid && existing().status != 'frozen' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'fullName', 'specialty', 'workplace', 'experience',
+              'yearsExp', 'price', 'portfolioLink', 'payoutMethod',
+              'instapay_link', 'instapay_phone', 'wallet_phone', 'wallet_provider',
+              'bank_name', 'bank_iban', 'bank_holder', 'fawry_phone',
+              'accepted_methods', 'updatedAt'
+            ]))
+        );
+      allow delete: if isValidId(mentorId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 6. MENTORS PUBLIC (No PII - Directory Visible to Students & Visitors)
+    // ---------------------------------------------------------
+    match /mentors_public/{mentorId} {
+      allow get: if isValidId(mentorId) && (existing().status in ['pending_verification', 'verified'] || isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow list: if existing().status in ['pending_verification', 'verified'] || isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(mentorId) && isVerifiedEmail() &&
+        isValidMentorPublic(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().status == 'pending_verification' &&
+        incoming().isVerified == false &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(mentorId) && isVerifiedEmail() &&
+        isValidMentorPublic(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().ownerUid == request.auth.uid && existing().status != 'frozen' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'fullName', 'specialty', 'workplace', 'experience',
+              'yearsExp', 'portfolioLink', 'price', 'badge', 'bio',
+              'payoutMethod', 'instapay_link', 'accepted_methods', 'updatedAt'
+            ])) ||
+          (existing().status in ['pending_verification', 'verified'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['rating', 'reviewsList', 'sessionsCount', 'updatedAt']))
+        );
+      allow delete: if isValidId(mentorId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 7. COMPANIES (PII: Official Email & Commercial Register)
+    // ---------------------------------------------------------
+    match /companies/{companyId} {
+      allow get: if isValidId(companyId) && ((isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(companyId) && isVerifiedEmail() &&
+        isValidCompany(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().status == 'pending_verification' &&
+        incoming().isVerified == false &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(companyId) && isVerifiedEmail() &&
+        isValidCompany(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().ownerUid == request.auth.uid && existing().status != 'frozen' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'companyType', 'website', 'needs', 'updatedAt']))
+        );
+      allow delete: if isValidId(companyId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 8. VERIFICATIONS (Strict PII - Owner & Admin Only)
+    // ---------------------------------------------------------
+    match /verifications/{verifId} {
+      allow get: if isValidId(verifId) && ((isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(verifId) && isVerifiedEmail() &&
+        isValidVerification(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(verifId) && isVerifiedEmail() &&
+        isValidVerification(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow delete: if isValidId(verifId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 9. JOBS (No PII)
+    // ---------------------------------------------------------
+    match /jobs/{jobId} {
+      allow get: if isValidId(jobId) && (existing().status == 'نشط' || (isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
+      allow list: if existing().status == 'نشط' || isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(jobId) && isVerifiedEmail() &&
+        isValidJob(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().status == 'نشط' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(jobId) && isVerifiedEmail() &&
+        isValidJob(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().ownerUid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'minSkill', 'minScore', 'location', 'stipend', 'status', 'updatedAt'])) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['applicantsCount', 'updatedAt'])
+        );
+      allow delete: if isValidId(jobId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+    }
+
+    // ---------------------------------------------------------
+    // 10. APPLICATIONS (Global Consistency: Parent Job Must Exist)
+    // ---------------------------------------------------------
+    match /applications/{appId} {
+      allow get: if isValidId(appId) && (isAdmin() || (isSignedIn() && (existing().ownerUid == request.auth.uid || existing().jobOwnerUid == request.auth.uid)));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && (existing().ownerUid == request.auth.uid || existing().jobOwnerUid == request.auth.uid));
+      allow create: if isValidId(appId) && isVerifiedEmail() &&
+        isValidApplication(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        exists(/databases/$(database)/documents/jobs/$(incoming().jobId)) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(appId) && isVerifiedEmail() &&
+        isValidApplication(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().jobOwnerUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+        );
+      allow delete: if isValidId(appId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 11. CHALLENGES (Lab)
+    // ---------------------------------------------------------
+    match /challenges/{challengeId} {
+      allow get: if isValidId(challengeId) && (existing().status == 'نشط' || isAdmin());
+      allow list: if existing().status == 'نشط' || isBootstrappedAdmin();
+      allow create: if isValidId(challengeId) && isAdmin() &&
+        isValidChallenge(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(challengeId) && isVerifiedEmail() &&
+        isValidChallenge(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['submissionsCount', 'updatedAt'])
+        );
+      allow delete: if isValidId(challengeId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 12. SUBMISSIONS (Lab Work)
+    // ---------------------------------------------------------
+    match /submissions/{submissionId} {
+      allow get: if isValidId(submissionId) && ((isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(submissionId) && isVerifiedEmail() &&
+        isValidSubmission(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(submissionId) && isVerifiedEmail() &&
+        isValidSubmission(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow delete: if isValidId(submissionId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 13. BOOKINGS (Student-Mentor 1-on-1 Sessions)
+    // ---------------------------------------------------------
+    match /bookings/{bookingId} {
+      allow get: if isValidId(bookingId) && (isAdmin() || (isSignedIn() && (existing().ownerUid == request.auth.uid || existing().mentorOwnerUid == request.auth.uid)));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && (existing().ownerUid == request.auth.uid || existing().mentorOwnerUid == request.auth.uid));
+      allow create: if isValidId(bookingId) && isVerifiedEmail() &&
+        isValidBooking(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        exists(/databases/$(database)/documents/mentors_public/$(incoming().mentorId)) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(bookingId) && isVerifiedEmail() &&
+        isValidBooking(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().ownerUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['hasBeenRated', 'rating', 'comment', 'updatedAt']))
+        );
+      allow delete: if isValidId(bookingId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 14. REPORTS (Anti-Scam Moderation Queue)
+    // ---------------------------------------------------------
+    match /reports/{reportId} {
+      allow get: if isValidId(reportId) && (isAdmin() || (isSignedIn() && existing().reporterUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().reporterUid == request.auth.uid);
+      allow create: if isValidId(reportId) && isVerifiedEmail() &&
+        isValidReport(incoming()) &&
+        incoming().reporterUid == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(reportId) && isAdmin() &&
+        isValidReport(incoming()) &&
+        incoming().reporterUid == existing().reporterUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isValidId(reportId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 15. BLACKLIST IPS (Strict Admin Only)
+    // ---------------------------------------------------------
+    match /blacklist_ips/{ipId} {
+      allow get: if isValidId(ipId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create: if isValidId(ipId) && isAdmin() &&
+        isValidBlacklistIp(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(ipId) && isAdmin() &&
+        isValidBlacklistIp(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isValidId(ipId) && isAdmin();
+    }
+
+    // ---------------------------------------------------------
+    // 16. PORTFOLIO ITEMS
+    // ---------------------------------------------------------
+    match /portfolio_items/{itemId} {
+      allow get: if isValidId(itemId) && (existing().approvalStatus == 'approved' || (isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
+      allow list: if existing().approvalStatus == 'approved' || isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(itemId) && isVerifiedEmail() &&
+        isValidPortfolioItem(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().approvalStatus == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(itemId) && isVerifiedEmail() &&
+        isValidPortfolioItem(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().ownerUid == request.auth.uid && existing().approvalStatus != 'rejected' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'type', 'date', 'url', 'description', 'updatedAt'])) ||
+          (existing().approvalStatus == 'approved' && incoming().diff(existing()).affectedKeys().hasOnly(['views', 'updatedAt']))
+        );
+      allow delete: if isValidId(itemId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+    }
+  }
+}

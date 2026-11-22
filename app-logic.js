@@ -7,6 +7,34 @@ import { INITIAL_DATA } from './data.js';
 import { loadFromStorageEngine, saveToStorageEngine, isSupabaseConnected } from './src/supabaseStorage.js';
 import { loadFromLocalStorage, saveToLocalStorage } from './backup-localStorage.js';
 import {
+  initFirebaseBridge,
+  ensureGoogleAuth,
+  forceGoogleSignIn,
+  firebaseSignOut,
+  isFirebaseAdminUser,
+  getFirebaseAuthStateSnapshot,
+  syncStudentRegistrationToCloud,
+  syncAdminAddedStudentToCloud,
+  syncStudentProgressToCloud,
+  syncMentorRegistrationToCloud,
+  syncCompanyRegistrationToCloud,
+  syncAdminEntityDecisionToCloud,
+  syncAdminDeleteEntityFromCloud,
+  syncJobCreateToCloud,
+  syncJobStatusUpdateToCloud,
+  syncApplicationCreateToCloud,
+  syncChallengeCreateToCloud,
+  syncChallengeDeleteToCloud,
+  syncBookingCreateToCloud,
+  syncBookingRatingToCloud,
+  syncSubmissionCreateToCloud,
+  syncReportCreateToCloud,
+  syncReportActionToCloud,
+  syncBlacklistIpAddToCloud,
+  syncBlacklistIpDeleteToCloud,
+  syncPortfolioItemDecisionToCloud
+} from './src/firebaseSync.ts';
+import {
   loadCVAndPortfolio,
   saveCV,
   savePortfolio,
@@ -179,6 +207,21 @@ export const state = {
 export function initApp() {
   loadFromStorage();
   setupGlobalFunctions();
+
+  initFirebaseBridge(state, portfolioState, () => {
+    reconcileAllPlatformUsers();
+    checkAllAccountsForScamKeywords();
+    if (state.currentUser && state.currentUser.role === 'admin' && state.currentView === 'landing' && isAdminAuthenticated()) {
+      state.currentView = 'admin-app';
+    } else if (state.currentUser && state.currentView === 'landing' && window.location.hash !== '#admin') {
+      if (state.currentUser.role === 'mentor') state.currentView = 'mentor-app';
+      else if (state.currentUser.role === 'company') state.currentView = 'company-app';
+      else if (state.currentUser.role === 'student') state.currentView = 'student-app';
+    }
+    updateCloudAuthBadges();
+    saveToStorage();
+    renderApp();
+  });
   
   // Check if role is saved in localStorage or URL hash/path
   const hash = window.location.hash;
@@ -195,7 +238,8 @@ export function initApp() {
   } else if (hash === '#privacy' || path === '/privacy') {
     state.currentView = 'privacy';
   } else if (state.currentUser) {
-    if (state.currentUser.role === 'admin' || (state.currentUser.email && state.currentUser.email.trim().toLowerCase() === 'phytomedia10@gmail.com')) {
+    const cuEmail = (state.currentUser.email || '').trim().toLowerCase();
+    if (state.currentUser.role === 'admin' || cuEmail === 'phytomedia10@gmail.com' || cuEmail === '34256abd@gmail.com') {
       state.currentView = 'admin-app';
     } else if (state.currentUser.role === 'mentor') state.currentView = 'mentor-app';
     else if (state.currentUser.role === 'company') state.currentView = 'company-app';
@@ -206,9 +250,142 @@ export function initApp() {
 
   // Auto scan and verify accounts
   checkAllAccountsForScamKeywords();
+  updateCloudAuthBadges();
 
   renderApp();
   window.lucide && window.lucide.createIcons();
+}
+
+export function updateCloudAuthBadges() {
+  const snap = getFirebaseAuthStateSnapshot();
+  const signupText = document.getElementById('signup-google-status-text');
+  if (signupText) {
+    signupText.innerText = snap.isSignedIn
+      ? `✓ متصل بحساب Google: ${snap.email}`
+      : 'ربط الحساب بـ Google لضمان المزامنة السحابية عبر الأجهزة ☁️';
+  }
+  const adminBadge = document.getElementById('admin-cloud-sync-badge');
+  const adminBtn = document.getElementById('admin-cloud-connect-btn');
+  if (adminBadge) {
+    if (snap.isAdmin) {
+      adminBadge.className = 'text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold flex items-center gap-1';
+      adminBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span><span>سحابة الإدارة متصلة (${snap.email}) ☁️</span>`;
+    } else {
+      adminBadge.className = 'text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold flex items-center gap-1';
+      adminBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span><span>محلي فقط — اضغط مزامنة السحابة عبر Google لرؤية جميع الهواتف</span>`;
+    }
+  }
+  if (adminBtn) {
+    if (snap.isAdmin) {
+      adminBtn.classList.add('hidden');
+    } else {
+      adminBtn.classList.remove('hidden');
+    }
+  }
+}
+
+export async function connectGoogleForSignup() {
+  try {
+    const user = await forceGoogleSignIn();
+    const emailInput = document.getElementById('reg-email');
+    const nameInput = document.getElementById('reg-name');
+    if (emailInput && !emailInput.value.trim() && state.activeRoleModal !== 'company') {
+      emailInput.value = user.email || '';
+    }
+    if (nameInput && !nameInput.value.trim() && user.displayName) {
+      nameInput.value = user.displayName;
+    }
+    updateCloudAuthBadges();
+    showToast(`تم ربط حساب Google (${user.email}) بنجاح ☁️`);
+  } catch (err) {
+    console.warn('Google signup connect cancelled or failed:', err);
+    alert('تعذر الاتصال بحساب Google. تأكد من السماح بالنوافذ المنبثقة ثم حاول مرة أخرى.');
+  }
+}
+
+export async function loginWithGoogleQuick() {
+  try {
+    const user = await forceGoogleSignIn();
+    updateCloudAuthBadges();
+    if (isFirebaseAdminUser(user)) {
+      sessionStorage.setItem('phi_admin_authenticated', 'true');
+      localStorage.setItem('phi_admin_authenticated', 'true');
+      state.currentUser = {
+        id: 'admin-super',
+        uid: user.uid,
+        role: 'admin',
+        name: user.displayName || 'المدير العام φ To Media',
+        email: user.email || '34256abd@gmail.com',
+        status: 'active',
+        joinedAt: new Date().toLocaleDateString('ar-EG')
+      };
+      state.currentView = 'admin-app';
+      window.location.hash = '#admin';
+      saveToStorage();
+      renderApp();
+      showToast('✓ تم تسجيل دخول الإدارة السحابي بنجاح!');
+      return;
+    }
+    showToast(`✓ أهلاً بك (${user.displayName || user.email})! جاري استعادة بياناتك من السحابة...`);
+    setTimeout(() => {
+      if (state.currentUser && state.currentUser.uid === user.uid) {
+        if (state.currentUser.role === 'mentor') navigateView('mentor-app');
+        else if (state.currentUser.role === 'company') navigateView('company-app');
+        else navigateView('student-app');
+      } else {
+        navigateView('role-select');
+      }
+    }, 900);
+  } catch (err) {
+    console.warn('Google quick login error:', err);
+    alert('تعذر تسجيل الدخول عبر Google. تأكد من السماح بالنوافذ المنبثقة.');
+  }
+}
+
+export async function loginAdminWithGoogle() {
+  try {
+    const user = await forceGoogleSignIn();
+    if (!isFirebaseAdminUser(user)) {
+      await firebaseSignOut();
+      alert(`⛔ هذا الحساب (${user.email || 'غير معروف'}) غير مصرح له بالدخول للوحة الإدارة. يرجى تسجيل الدخول بحساب الإدارة المعتمد.`);
+      return;
+    }
+    sessionStorage.setItem('phi_admin_authenticated', 'true');
+    localStorage.setItem('phi_admin_authenticated', 'true');
+    state.currentUser = {
+      id: 'admin-super',
+      uid: user.uid,
+      role: 'admin',
+      name: user.displayName || 'المدير العام φ To Media',
+      email: user.email || '34256abd@gmail.com',
+      status: 'active',
+      joinedAt: new Date().toLocaleDateString('ar-EG')
+    };
+    saveToStorage();
+    closeAdminLockModal();
+    state.currentView = 'admin-app';
+    window.location.hash = '#admin';
+    updateCloudAuthBadges();
+    renderApp();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    showToast(`✓ تم تفعيل المزامنة السحابية الفورية للإدارة (${user.email}) ☁️`);
+  } catch (err) {
+    console.warn('Admin Google login error:', err);
+    alert('تعذر إتمام دخول Google للإدارة. تأكد من السماح بالنوافذ المنبثقة ثم حاول مجدداً.');
+  }
+}
+
+function pushCurrentStudentProgress() {
+  if (!state.currentUser || state.currentUser.role !== 'student' || !state.currentUser.id) return;
+  syncStudentProgressToCloud(state.currentUser.id, {
+    overall: state.timaCard?.overall || 0,
+    timaStats: state.timaCard?.stats || {},
+    totalPoints: state.totalPoints || 0,
+    works: (portfolioState && portfolioState.items) ? portfolioState.items.length : 0,
+    customTheme: state.customTheme || 'cosmic'
+  }).catch((err) => {
+    console.warn('Student progress cloud sync skipped:', err);
+  });
 }
 
 function loadFromStorage() {
@@ -683,6 +860,20 @@ function renderRoleSignupForm(role) {
     setMentorSignupPayoutTab(state.mentorSignupPayoutTab || 'instapay');
   }
 
+  // Prefill Google verified email if signed in (except company which requires custom domain email)
+  const authSnap = getFirebaseAuthStateSnapshot();
+  if (authSnap.isSignedIn) {
+    const emailEl = document.getElementById('reg-email');
+    const nameEl = document.getElementById('reg-name');
+    if (emailEl && !emailEl.value.trim() && role !== 'company') {
+      emailEl.value = authSnap.email || '';
+    }
+    if (nameEl && !nameEl.value.trim() && authSnap.displayName) {
+      nameEl.value = authSnap.displayName;
+    }
+  }
+  updateCloudAuthBadges();
+
   // Reset privacy checkbox
   const chk = document.getElementById('role-privacy-check');
   if (chk) chk.checked = false;
@@ -872,7 +1063,7 @@ export function validateRoleSignupForm() {
   }
 }
 
-export function submitRoleSignup() {
+export async function submitRoleSignup() {
   const role = state.activeRoleModal;
   const chk = document.getElementById('role-privacy-check');
   if (!chk || !chk.checked) {
@@ -900,6 +1091,7 @@ export function submitRoleSignup() {
       joinedAt: new Date().toLocaleDateString('ar-EG')
     };
     sessionStorage.setItem('phi_admin_authenticated', 'true');
+    localStorage.setItem('phi_admin_authenticated', 'true');
     saveToStorage();
     closeRoleSignup();
     navigateView('admin-app');
@@ -907,8 +1099,17 @@ export function submitRoleSignup() {
     return;
   }
 
+  let fbUser = null;
+  try {
+    fbUser = await ensureGoogleAuth();
+  } catch (authErr) {
+    console.warn('Google auth required for cloud signup:', authErr);
+    alert('يجب تأكيد الدخول بحساب Google لحفظ ملفك في السحابة وتمكين الإدارة من متابعتك عبر المنصة.');
+    return;
+  }
+
   if (role === 'student') {
-    const email = document.getElementById('reg-email')?.value.trim() || 'student@media.eg';
+    const email = document.getElementById('reg-email')?.value.trim() || fbUser.email || 'student@media.eg';
     const dept = document.getElementById('reg-dept')?.value || 'إذاعة وتلفزيون';
     const gradYear = document.getElementById('reg-grad-year')?.value || '2027';
     const univ = document.getElementById('reg-univ')?.value.trim() || 'جامعة القاهرة';
@@ -917,6 +1118,7 @@ export function submitRoleSignup() {
 
     state.currentUser = {
       id: studentId,
+      uid: fbUser.uid,
       role: 'student',
       name,
       email,
@@ -932,32 +1134,39 @@ export function submitRoleSignup() {
     state.timaCard.gradYear = gradYear;
 
     if (!Array.isArray(state.students)) state.students = [];
+    const newStudentRecord = {
+      id: studentId,
+      ownerUid: fbUser.uid,
+      card_id: studentId,
+      name,
+      email,
+      position: 'طالب إعلام',
+      university: univ,
+      department: dept,
+      gradYear,
+      overall: state.timaCard.overall || 0,
+      OVR: state.timaCard.overall || 0,
+      timaStats: { ...(state.timaCard.stats || {}) },
+      status: 'active',
+      works: (portfolioState && portfolioState.items) ? portfolioState.items.length : 0,
+      joinedAt: joinedDate
+    };
+
     const existingStudent = state.students.find(s =>
       (email && s.email && s.email.toLowerCase() === email.toLowerCase()) ||
       (s.name && s.name.trim() === name)
     );
     if (!existingStudent) {
-      state.students.unshift({
-        id: studentId,
-        card_id: studentId,
-        name,
-        email,
-        position: 'طالب إعلام',
-        university: univ,
-        department: dept,
-        gradYear,
-        overall: state.timaCard.overall || 0,
-        OVR: state.timaCard.overall || 0,
-        timaStats: { ...(state.timaCard.stats || {}) },
-        status: 'active',
-        works: (portfolioState && portfolioState.items) ? portfolioState.items.length : 0,
-        joinedAt: joinedDate
-      });
+      state.students.unshift(newStudentRecord);
     }
 
     saveToStorage();
     closeRoleSignup();
     navigateView('student-app');
+
+    syncStudentRegistrationToCloud(newStudentRecord, state.totalPoints || 0).catch((err) => {
+      console.error('Student Firestore sync error:', err);
+    });
 
   } else if (role === 'mentor') {
     const specialty = document.getElementById('reg-specialty')?.value.trim() || 'مونتاج وإخراج';
@@ -996,11 +1205,12 @@ export function submitRoleSignup() {
 
     const instapayQr = state.uploadedMentorInstapayQr || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(instapayHandle)}`;
 
-    const mentorEmail = document.getElementById('reg-email')?.value?.trim() || '';
+    const mentorEmail = document.getElementById('reg-email')?.value?.trim() || fbUser.email || '';
     const mentorId = `mentor-${Date.now()}`;
     const joinedDate = new Date().toLocaleDateString('ar-EG');
     state.currentUser = {
       id: mentorId,
+      uid: fbUser.uid,
       role: 'mentor',
       name,
       email: mentorEmail,
@@ -1033,6 +1243,7 @@ export function submitRoleSignup() {
     // Add to mentors array (single source of truth)
     const newMentor = {
       id: mentorId,
+      ownerUid: fbUser.uid,
       name,
       fullName: name,
       email: mentorEmail,
@@ -1071,8 +1282,9 @@ export function submitRoleSignup() {
     state.mentors.unshift(newMentor);
 
     // Add to verifications table synced with state.mentors
-    state.verifications.unshift({
-      id: `verif-${Date.now()}`,
+    const newVerif = {
+      id: `verif-mentor-${mentorId}`,
+      ownerUid: fbUser.uid,
       userId: mentorId,
       name: name,
       role: 'mentor',
@@ -1087,14 +1299,19 @@ export function submitRoleSignup() {
       syndicateCard: state.uploadedMentorCard || '',
       date: joinedDate,
       status: 'pending'
-    });
+    };
+    state.verifications.unshift(newVerif);
 
     reconcileMentorsSource();
     saveToStorage();
     closeRoleSignup();
-    alert('⏳ تم تقديم طلب الانضمام كمنتور بنجاح!\n\nتمت إضافتك لقائمة المنتورز وطلبات التوثيق في لوحة الإدارة.');
+    alert('⏳ تم تقديم طلب الانضمام كمنتور بنجاح!\n\nتمت إضافتك لقائمة المنتورز وطلبات التوثيق في السحابة ولوحة الإدارة.');
     navigateView('mentor-app');
     renderMentorsList();
+
+    syncMentorRegistrationToCloud(newMentor, newVerif).catch((err) => {
+      console.error('Mentor Firestore sync error:', err);
+    });
 
   } else if (role === 'company') {
     const type = document.getElementById('reg-company-type')?.value || 'شركة انتاج';
@@ -1128,6 +1345,7 @@ export function submitRoleSignup() {
     const compJoinedDate = new Date().toLocaleDateString('ar-EG');
     state.currentUser = {
       id: compId,
+      uid: fbUser.uid,
       role: 'company',
       name,
       companyType: type,
@@ -1141,9 +1359,9 @@ export function submitRoleSignup() {
       joinedAt: compJoinedDate
     };
 
-    if (!Array.isArray(state.companies)) state.companies = [];
-    state.companies.unshift({
+    const newCompanyRecord = {
       id: compId,
+      ownerUid: fbUser.uid,
       name,
       companyType: type,
       email,
@@ -1154,11 +1372,15 @@ export function submitRoleSignup() {
       verificationStatus: 'pending_verification',
       isVerified: false,
       joinedAt: compJoinedDate
-    });
+    };
+
+    if (!Array.isArray(state.companies)) state.companies = [];
+    state.companies.unshift(newCompanyRecord);
 
     // Add to verifications table for Admin Approval
-    state.verifications.unshift({
-      id: `verif-${Date.now()}`,
+    const newCompVerif = {
+      id: `verif-comp-${compId}`,
+      ownerUid: fbUser.uid,
       userId: compId,
       name: name,
       role: 'company',
@@ -1169,18 +1391,24 @@ export function submitRoleSignup() {
       needs: needs,
       date: compJoinedDate,
       status: 'pending'
-    });
+    };
+    state.verifications.unshift(newCompVerif);
 
     saveToStorage();
     closeRoleSignup();
-    alert('⏳ تم تسجيل المؤسسة بنجاح!\n\nحساب المؤسسة الآن (قيد التوثيق والمراجعة). سيقوم مسؤولو المنصة بمراجعة السجل التجاري والموقع الرسمي قبل نشر الوظائف والتواصل مع الطلاب.');
+    alert('⏳ تم تسجيل المؤسسة بنجاح!\n\nحساب المؤسسة الآن (قيد التوثيق والمراجعة) في السحابة. سيقوم مسؤولو المنصة بمراجعة السجل التجاري والموقع الرسمي.');
     navigateView('company-app');
+
+    syncCompanyRegistrationToCloud(newCompanyRecord, newCompVerif).catch((err) => {
+      console.error('Company Firestore sync error:', err);
+    });
   }
 }
 
 export function logoutUser() {
   state.currentUser = null;
   localStorage.removeItem(STORAGE_KEY_USER);
+  firebaseSignOut().catch(() => {});
   navigateView('landing');
 }
 
@@ -1336,6 +1564,7 @@ export function addTimaPoints(amount, reason = '') {
   const gained = Math.round(amount * prestigeBonus);
   state.totalPoints += gained;
   saveToStorage();
+  pushCurrentStudentProgress();
 
   const newLevelInfo = getInfiniteLevel(state.totalPoints);
   if (newLevelInfo.level > oldLevel) {
@@ -1353,6 +1582,7 @@ export function addTimaPoints(amount, reason = '') {
 export function setTimaPoints(targetPts) {
   state.totalPoints = Math.max(0, parseInt(targetPts) || 0);
   saveToStorage();
+  pushCurrentStudentProgress();
   updateTimaCardUI();
   renderLeaderboard();
 }
@@ -1369,6 +1599,7 @@ export function triggerPrestige() {
     state.prestigeCount = (state.prestigeCount || 0) + 1;
     state.totalPoints = 3000; // resets to base of infinite levels
     saveToStorage();
+    pushCurrentStudentProgress();
     updateTimaCardUI();
     renderLeaderboard();
     alert(`👑 تهانينا! أصبحت الآن صاحب شارة Prestige ${state.prestigeCount}! شارتك الذهبية مخلدة الآن في تاريخ إعلام مصر.`);
@@ -1378,6 +1609,7 @@ export function triggerPrestige() {
 export function setCustomCardTheme(themeName) {
   state.customTheme = themeName;
   saveToStorage();
+  pushCurrentStudentProgress();
   updateTimaCardUI();
 }
 
@@ -1390,6 +1622,7 @@ export function calculateTimaOverall() {
   const avg = Math.round(sum / 6);
   state.timaCard.overall = avg;
   saveToStorage();
+  pushCurrentStudentProgress();
   updateTimaCardUI();
 }
 
@@ -1616,6 +1849,7 @@ export async function evaluateTimaCard(workText) {
 
     updateTimaCardUI();
     saveToStorage();
+    pushCurrentStudentProgress();
 
     const feedbackBox = document.getElementById('tima-ai-feedback-box');
     if (feedbackBox) {
@@ -1819,6 +2053,9 @@ export function openMentorPaymentGateway(mentor, sessionDetails) {
     mentor.earnings = (mentor.earnings || 0) + mentor.price;
     mentor.sessionsCount = (mentor.sessionsCount || 0) + 1;
     saveToStorage();
+    syncBookingCreateToCloud(newBooking).catch((err) => {
+      console.warn('Booking cloud sync skipped:', err);
+    });
 
     closeBookingModal();
     openMentorRoom(mentor.id, newBooking);
@@ -2135,6 +2372,7 @@ function handleScamDetection(reportedId, matches, text) {
 
   state.reports.unshift(newReport);
   saveToStorage();
+  syncReportCreateToCloud(newReport).catch(() => {});
 
   // Evaluate auto block (3 reports = freeze)
   const isFrozen = checkAndApplyAutoBlock(reportedId);
@@ -2182,11 +2420,13 @@ export function createCompanyJob() {
     location,
     stipend: 'مكافأة شهرية + بدل انتقال',
     applicantsCount: 0,
+    status: 'نشط',
     date: 'الآن'
   };
 
   state.jobs.unshift(newJob);
   saveToStorage();
+  syncJobCreateToCloud(newJob).catch((err) => console.warn('Job cloud sync error:', err));
   renderApp();
   alert('تم نشر فرصة العمل/التدريب بنجاح! يمكن للطلبة أصحاب بطاقات Tima التقديم الآن. 🎯');
 }
@@ -2221,7 +2461,7 @@ export function applyToJob(jobId) {
     id: `app-${Date.now()}`,
     jobId: job.id,
     jobTitle: job.title,
-    studentId: `stud-${Date.now()}`,
+    studentId: state.currentUser?.id || `stud-${Date.now()}`,
     studentName: state.currentUser?.name || state.timaCard.name,
     university: state.currentUser?.university || 'جامعة القاهرة',
     department: state.currentUser?.department || state.timaCard.department,
@@ -2234,6 +2474,7 @@ export function applyToJob(jobId) {
   state.applications.unshift(newApp);
   job.applicantsCount = (job.applicantsCount || 0) + 1;
   saveToStorage();
+  syncApplicationCreateToCloud(newApp, job.applicantsCount).catch((err) => console.warn('Application cloud sync error:', err));
   alert(`تهانينا! تم التقديم بنجاح على "${job.title}". ستصل بطاقتك Tima والبورتفوليو إلى الشركة فوراً.`);
   renderApp();
 }
@@ -2488,9 +2729,10 @@ export async function submitLabWork() {
     }
 
     // Save submission
-    const studentName = state.currentUser?.name || state.timaCard.name || 'مريم حسام شريف';
+    const studentName = state.currentUser?.name || state.timaCard.name || 'طالب إعلام';
     const newSub = {
       id: `sub-${Date.now()}`,
+      challengeId: challenge.id,
       studentName,
       challengeTitle: challenge.title,
       category: challenge.category,
@@ -2515,8 +2757,13 @@ export async function submitLabWork() {
     }
     state.submissions.unshift(newSub);
     INITIAL_DATA.submissions.unshift(newSub);
+    if (challenge && typeof challenge.submissionsCount === 'number') {
+      challenge.submissionsCount += 1;
+    }
 
     saveToStorage();
+    pushCurrentStudentProgress();
+    syncSubmissionCreateToCloud(newSub, typeof challenge?.submissionsCount === 'number' ? challenge.submissionsCount : undefined).catch(() => {});
     updateTimaCardUI();
     renderLabSubmissions();
 
@@ -2557,8 +2804,9 @@ ${link ? '• تم فحص الرابط المرفق وقراءته عبر urlCon
 // -------------------------------------------------------------
 export function isAdminAuthenticated() {
   const isAuth = sessionStorage.getItem('phi_admin_authenticated') === 'true' || localStorage.getItem('phi_admin_authenticated') === 'true';
-  const isEmail = state.currentUser && state.currentUser.email && state.currentUser.email.trim().toLowerCase() === 'phytomedia10@gmail.com';
-  return isAuth || isEmail;
+  const email = (state.currentUser?.email || '').trim().toLowerCase();
+  const isEmail = email === 'phytomedia10@gmail.com' || email === '34256abd@gmail.com';
+  return isAuth || isEmail || isFirebaseAdminUser();
 }
 
 export function checkAdminAccess() {
@@ -2613,12 +2861,12 @@ export function submitAdminLock(e) {
   const email = (emailInput?.value || '').trim().toLowerCase();
   const pass = (passInput?.value || '').trim();
 
-  if ((email === 'phytomedia10@gmail.com' || !email) && (pass === 'phy-k13204' || pass === 'phi2026')) {
+  if ((email === 'phytomedia10@gmail.com' || email === '34256abd@gmail.com' || !email) && (pass === 'phy-k13204' || pass === 'phi2026')) {
     state.currentUser = {
       id: 'admin-super',
       role: 'admin',
       name: 'المدير العام φ To Media',
-      email: 'phytomedia10@gmail.com',
+      email: email || 'phytomedia10@gmail.com',
       status: 'active',
       joinedAt: new Date().toLocaleDateString('ar-EG')
     };
@@ -2628,9 +2876,10 @@ export function submitAdminLock(e) {
     closeAdminLockModal();
     state.currentView = 'admin-app';
     window.location.hash = '#admin';
+    updateCloudAuthBadges();
     renderApp();
     window.scrollTo({ top: 0, behavior: 'smooth' });
-    alert('✓ مرحباً بك يا مدير المنظومة! تم تسجيل الدخول بنجاح وإظهار لوحة التحكم.');
+    alert('✓ مرحباً بك يا مدير المنظومة! تم فتح لوحة التحكم.\nملاحظة: لجلب جميع المسجلين من الهواتف الأخرى لحظياً، اضغط "مزامنة السحابة عبر Google ☁️" بالأعلى.');
   } else {
     if (errorEl) {
       errorEl.innerText = '⛔ البريد الإلكتروني أو كلمة المرور غير صحيحة! لا يمكن الدخول إلا بالحساب المصرح له رسمياً.';
@@ -2648,6 +2897,7 @@ export function logoutAdmin() {
   sessionStorage.removeItem('phi_admin_authenticated');
   localStorage.removeItem('phi_admin_authenticated');
   localStorage.removeItem(STORAGE_KEY_USER);
+  firebaseSignOut().catch(() => {});
   if (window.location.hash === '#admin') {
     window.location.hash = '';
   }
@@ -2681,6 +2931,7 @@ export function createAdminChallenge() {
 
   state.challenges.unshift(newCh);
   saveToStorage();
+  syncChallengeCreateToCloud(newCh).catch(() => {});
   renderApp();
   alert('تمت إضافة التحدي الجديد في المعمل بنجاح! 🏆');
 }
@@ -4399,6 +4650,7 @@ export function submitReport() {
 
   state.reports.unshift(newReport);
   saveToStorage();
+  syncReportCreateToCloud(newReport).catch(() => {});
 
   // Evaluate auto block:
   const isFrozen = checkAndApplyAutoBlock(reportedId);
@@ -4467,6 +4719,7 @@ export function openAllUsersWithFilter(roleFilter = 'all') {
 }
 
 export function renderAdminApp() {
+  updateCloudAuthBadges();
   const allPeople = getAllPlatformPeople();
   const allMentors = state.mentors || [];
   const pendingVerifsList = getPendingVerificationsList();
@@ -4679,6 +4932,7 @@ export function toggleStudentStatus(studentId) {
   }
 
   saveToStorage();
+  syncAdminEntityDecisionToCloud('student', studentId, willBeFrozen ? 'frozen' : 'active').catch(() => {});
   renderAdminStudentsTable();
   renderAdminApp();
 
@@ -4724,6 +4978,7 @@ export function executeDeleteStudent() {
 
   state.students = state.students.filter(s => s.id !== studentId);
   saveToStorage();
+  syncAdminDeleteEntityFromCloud('student', studentId).catch(() => {});
 
   closeDeleteStudentModal();
   renderAdminStudentsTable();
@@ -4794,6 +5049,7 @@ export function submitAdminNewStudent(e) {
 
   state.students.unshift(newStudent);
   saveToStorage();
+  syncAdminAddedStudentToCloud(newStudent).catch(() => {});
 
   closeAdminAddStudentModal();
   renderAdminStudentsTable();
@@ -4963,6 +5219,7 @@ export function approveMentorDirectly(mentorId) {
   }
 
   saveToStorage();
+  syncAdminEntityDecisionToCloud('mentor', mentorId, 'verified', verif?.id || `verif-mentor-${mentorId}`).catch(() => {});
   renderAdminApp();
   renderAdminMentorsTable();
   renderAdminProtectionTab();
@@ -4982,6 +5239,7 @@ export function toggleMentorStatus(mentorId) {
   }
 
   saveToStorage();
+  syncAdminEntityDecisionToCloud('mentor', mentorId, willBeFrozen ? 'frozen' : (mentor.isVerified ? 'verified' : 'active')).catch(() => {});
   renderAdminApp();
   renderAdminMentorsTable();
   renderMentorsList();
@@ -5000,6 +5258,7 @@ export function deleteAdminMentor(mentorId) {
   state.mentors = state.mentors.filter(m => m.id !== mentorId);
   state.verifications = state.verifications.filter(v => !(v.role === 'mentor' && v.userId === mentorId));
   saveToStorage();
+  syncAdminDeleteEntityFromCloud('mentor', mentorId).catch(() => {});
 
   renderAdminApp();
   renderAdminMentorsTable();
@@ -5210,6 +5469,7 @@ export function approveCompanyDirectly(compId) {
   }
 
   saveToStorage();
+  syncAdminEntityDecisionToCloud('company', compId, 'verified', verif?.id || `verif-comp-${compId}`).catch(() => {});
   renderAdminApp();
   renderAdminAllUsersTable();
   renderAdminProtectionTab();
@@ -5228,6 +5488,7 @@ export function toggleCompanyStatus(compId) {
   }
 
   saveToStorage();
+  syncAdminEntityDecisionToCloud('company', compId, willBeFrozen ? 'frozen' : (comp.isVerified ? 'verified' : 'active')).catch(() => {});
   renderAdminApp();
   renderAdminAllUsersTable();
   alert(willBeFrozen
@@ -5244,6 +5505,7 @@ export function deleteAdminCompany(compId) {
   state.companies = state.companies.filter(c => c.id !== compId);
   state.verifications = state.verifications.filter(v => !(v.role === 'company' && v.userId === compId));
   saveToStorage();
+  syncAdminDeleteEntityFromCloud('company', compId).catch(() => {});
 
   renderAdminApp();
   renderAdminAllUsersTable();
@@ -5391,6 +5653,7 @@ export function approvePortfolioItem(itemId) {
 
   item.approvalStatus = 'approved';
   savePortfolio();
+  syncPortfolioItemDecisionToCloud(itemId, 'approved').catch(() => {});
 
   // Award +50 XP to student
   addTimaPoints(50, `اعتماد مشروع (${item.title}) في معرض الأعمال`);
@@ -5410,6 +5673,7 @@ export function rejectPortfolioItem(itemId) {
 
   item.approvalStatus = 'rejected';
   savePortfolio();
+  syncPortfolioItemDecisionToCloud(itemId, 'rejected').catch(() => {});
 
   renderAdminPortfolioTable();
   renderAdminApp();
@@ -5463,6 +5727,7 @@ export function submitAdminNewChallenge(e) {
 
   state.challenges.unshift(newCh);
   saveToStorage();
+  syncChallengeCreateToCloud(newCh).catch(() => {});
 
   closeAdminAddChallengeModal();
   renderAdminChallengesTable();
@@ -5477,6 +5742,7 @@ export function deleteAdminChallenge(challengeId) {
 
   state.challenges = state.challenges.filter(c => c.id !== challengeId);
   saveToStorage();
+  syncChallengeDeleteToCloud(challengeId).catch(() => {});
 
   renderAdminChallengesTable();
   renderAdminApp();
@@ -5542,6 +5808,7 @@ export function toggleJobStatus(jobId) {
 
   job.status = job.status === 'مغلق' ? 'نشط' : 'مغلق';
   saveToStorage();
+  syncJobStatusUpdateToCloud(jobId, job.status).catch(() => {});
   renderAdminCompanyRequestsTable();
   alert(`تم تغيير حالة الطلب (${job.title}) إلى: ${job.status}`);
 }
@@ -5738,6 +6005,7 @@ export function approveVerification(verifId) {
 
   const targetName = (verif && verif.name) || (mentor && (mentor.fullName || mentor.name)) || 'الحساب';
   const targetUserId = (verif && verif.userId) || (mentor && mentor.id);
+  const targetRole = (verif && verif.role) || (mentor ? 'mentor' : 'company');
 
   if (verif) verif.status = 'verified';
 
@@ -5766,6 +6034,9 @@ export function approveVerification(verifId) {
   }
 
   saveToStorage();
+  if (targetUserId) {
+    syncAdminEntityDecisionToCloud(targetRole === 'company' ? 'company' : 'mentor', targetUserId, 'verified', verif?.id).catch(() => {});
+  }
   alert(`✓ تم اعتماد وتوثيق حساب (${targetName}) بنجاح!\nسيظهر الآن في قوائم المنصة للطلاب مع شارة "موثق ✓" باللون البنفسجي.`);
   renderAdminApp();
   renderAdminAllUsersTable();
@@ -5781,6 +6052,8 @@ export function rejectVerification(verifId) {
   if (!verif && !mentor) return;
 
   const targetName = (verif && verif.name) || (mentor && (mentor.fullName || mentor.name)) || 'الحساب';
+  const targetUserId = (verif && verif.userId) || (mentor && mentor.id);
+  const targetRole = (verif && verif.role) || (mentor ? 'mentor' : 'company');
 
   if (verif) verif.status = 'rejected';
 
@@ -5800,6 +6073,9 @@ export function rejectVerification(verifId) {
   }
 
   saveToStorage();
+  if (targetUserId) {
+    syncAdminEntityDecisionToCloud(targetRole === 'company' ? 'company' : 'mentor', targetUserId, 'rejected', verif?.id).catch(() => {});
+  }
   alert(`تم رفض طلب التوثيق لحساب (${targetName}).`);
   renderAdminApp();
   renderAdminAllUsersTable();
@@ -5894,11 +6170,17 @@ export function takeReportAction(reportId, action) {
     
     // Freeze target account
     const mentor = state.mentors.find(m => m.id == report.reportedId);
-    if (mentor) mentor.status = 'frozen';
+    if (mentor) {
+      mentor.status = 'frozen';
+      syncAdminEntityDecisionToCloud('mentor', mentor.id, 'frozen').catch(() => {});
+    }
     
     if (state.companies) {
       const comp = state.companies.find(c => c.id == report.reportedId);
-      if (comp) comp.status = 'frozen';
+      if (comp) {
+        comp.status = 'frozen';
+        syncAdminEntityDecisionToCloud('company', comp.id, 'frozen').catch(() => {});
+      }
     }
 
     if (state.currentUser && (state.currentUser.id == report.reportedId || state.currentUser.name == report.reportedId)) {
@@ -5909,25 +6191,31 @@ export function takeReportAction(reportId, action) {
     const randomIp = `197.34.88.${Math.floor(Math.random() * 80 + 10)}`;
     const alreadyListed = state.blacklistIps.some(ip => ip.ip === randomIp);
     if (!alreadyListed) {
-      state.blacklistIps.unshift({
+      const newIpEntry = {
+        id: randomIp,
         ip: randomIp,
         reason: `حظر نهائي لتأكيد بلاغ احتيال: ${report.reason} (${report.reportedName})`,
         date: new Date().toLocaleDateString('ar-EG'),
         addedBy: 'إدارة المنظومة'
-      });
+      };
+      state.blacklistIps.unshift(newIpEntry);
+      syncBlacklistIpAddToCloud(newIpEntry).catch(() => {});
     }
 
     saveToStorage();
+    syncReportActionToCloud(reportId, 'approved_banned').catch(() => {});
     alert(`🚫 تمت الموافقة على البلاغ وحظر حساب (${report.reportedName}) نهائياً وحجبه من كافة القوائم وإضافة عنوان الشبكة للقائمة السوداء.`);
 
   } else if (action === 'warn') {
     report.status = 'warned';
     saveToStorage();
+    syncReportActionToCloud(reportId, 'warned').catch(() => {});
     alert(`⚠️ تم توجيه إنذار رسمي للحساب (${report.reportedName}) بحظر أي طلبات أموال أو مخالفة للشروط.`);
 
   } else if (action === 'reject') {
     report.status = 'rejected';
     saveToStorage();
+    syncReportActionToCloud(reportId, 'rejected').catch(() => {});
     alert(`تم رفض البلاغ باعتباره غير مثبت أو كيدي.`);
   }
 
@@ -5965,14 +6253,17 @@ export function addIpToBlacklist() {
     return;
   }
 
-  state.blacklistIps.unshift({
+  const newEntry = {
+    id: ip,
     ip,
     reason: reason || 'محاولة احتيال ونصب وطلب تحويلات',
     date: new Date().toLocaleDateString('ar-EG'),
     addedBy: 'إدارة المنصة'
-  });
+  };
+  state.blacklistIps.unshift(newEntry);
 
   saveToStorage();
+  syncBlacklistIpAddToCloud(newEntry).catch(() => {});
   if (ipInput) ipInput.value = '';
   if (reasonInput) reasonInput.value = '';
 
@@ -5983,6 +6274,7 @@ export function addIpToBlacklist() {
 export function removeIpFromBlacklist(ip) {
   state.blacklistIps = state.blacklistIps.filter(item => item.ip !== ip);
   saveToStorage();
+  syncBlacklistIpDeleteToCloud(ip).catch(() => {});
   renderAdminProtectionTab();
   alert(`تم فك حظر الـ IP (${ip}).`);
 }
@@ -6163,6 +6455,15 @@ export function submitMentorRating() {
   }
 
   saveToStorage();
+  syncBookingRatingToCloud(
+    bookingId || undefined,
+    mentor.id,
+    score,
+    comment,
+    mentor.rating,
+    mentor.reviewsList,
+    mentor.sessionsCount
+  ).catch((err) => console.warn('Mentor rating cloud sync error:', err));
   closeRatingModal();
 
   showToast('تم حفظ تقييمك ومراجعتك للمنتور بنجاح! ⭐✨');
@@ -6284,6 +6585,10 @@ export function setupGlobalFunctions() {
     mountReactComponent,
     unmountReactComponent,
     openMentorPaymentGateway,
+    connectGoogleForSignup,
+    loginWithGoogleQuick,
+    loginAdminWithGoogle,
+    updateCloudAuthBadges,
     setStudentTab,
     toggleFaqItem,
     setBuilderSubTab,

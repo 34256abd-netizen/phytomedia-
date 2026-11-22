@@ -4,6 +4,7 @@
 // =============================================================
 
 import { state, addTimaPoints, compressImageFile } from './app-logic.js';
+import { syncPortfolioItemCreateToCloud, syncPortfolioItemDeleteFromCloud } from './src/firebaseSync.ts';
 import arabicReshaper from 'arabic-reshaper';
 import bidiFactory from 'bidi-js';
 
@@ -2271,6 +2272,12 @@ export function submitNewPortfolioWork() {
   const saved = savePortfolio(workItem.title);
   if (saved) {
     closeAddWorkModal();
+    syncPortfolioItemCreateToCloud({
+      ...workItem,
+      studentName: state.currentUser?.name || state.timaCard?.name || 'طالب إعلام'
+    }).catch((err) => {
+      console.warn('Portfolio cloud sync error:', err);
+    });
   } else {
     // Rollback if storage failed
     portfolioState.items.shift();
@@ -2383,17 +2390,10 @@ export async function deletePortfolioItem(id, skipConfirm = false) {
     deleteFileFromIndexedDB(targetId);
   } catch (err) {}
 
-  // 6. Trigger Firebase Firestore deletion in background if available
-  try {
-    const { getFirestore, doc, deleteDoc } = await import('firebase/firestore').catch(() => ({}));
-    if (getFirestore && doc && deleteDoc) {
-      const db = getFirestore();
-      deleteDoc(doc(db, 'portfolio', targetId)).catch(() => {});
-      deleteDoc(doc(db, 'portfolio_items', targetId)).catch(() => {});
-    }
-  } catch (fbErr) {
-    // Graceful continuation for offline/local mode
-  }
+  // 6. Sync deletion to Firestore configured database in background
+  syncPortfolioItemDeleteFromCloud(targetId).catch((err) => {
+    console.warn('Portfolio delete cloud sync error:', err);
+  });
 }
 
 export function setPortfolioFilter(category) {
