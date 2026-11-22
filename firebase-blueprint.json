@@ -1238,9 +1238,13 @@
       "schema": { "$ref": "#/entities/UserAccount" },
       "description": "Private user account identities mapped 1:1 to Firebase Auth UID."
     },
+    "/users/{userId}/cv/{cvId}": {
+      "schema": { "$ref": "#/entities/UserCV" },
+      "description": "Private per-user CV builder document stored under users/{uid}/cv."
+    },
     "/user_cvs/{userId}": {
       "schema": { "$ref": "#/entities/UserCV" },
-      "description": "Private per-user CV builder document keyed 1:1 to Firebase Auth UID."
+      "description": "Legacy per-user CV builder document keyed 1:1 to Firebase Auth UID."
     },
     "/students/{studentId}": {
       "schema": { "$ref": "#/entities/Student" },

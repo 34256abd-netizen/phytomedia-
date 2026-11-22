@@ -4,13 +4,16 @@
 // =============================================================
 
 import { state, addTimaPoints, compressImageFile } from './app-logic.js';
+import { getCurrentAuthUser } from './src/firebase.ts';
 import {
   syncUserCVToCloud,
   getUserCVFromCloud,
   getPortfolioItemsFromCloud,
   getFirebaseAuthStateSnapshot,
   syncPortfolioItemCreateToCloud,
-  syncPortfolioItemDeleteFromCloud
+  syncPortfolioItemDeleteFromCloud,
+  GUEST_PENDING_CV_KEY,
+  GUEST_PENDING_PORTFOLIO_KEY
 } from './src/firebaseSync.ts';
 import arabicReshaper from 'arabic-reshaper';
 import bidiFactory from 'bidi-js';
@@ -250,10 +253,11 @@ export function loadCVAndPortfolio() {
   }
 
   // Hydrate authoritative CV & Portfolio from Cloud Firestore when signed in
+  // (skipped if local guest data is still queued for migration to avoid overwriting it)
   const snap = getFirebaseAuthStateSnapshot();
   if (snap.isSignedIn && snap.uid) {
     Promise.allSettled([
-      getUserCVFromCloud(snap.uid),
+      localStorage.getItem(GUEST_PENDING_CV_KEY) === '1' ? Promise.resolve(null) : getUserCVFromCloud(snap.uid),
       getPortfolioItemsFromCloud(snap.uid)
     ]).then(([cvRes, portRes]) => {
       let updated = false;
@@ -348,39 +352,67 @@ export async function deleteFileFromIndexedDB(id) {
   } catch (e) {}
 }
 
-// Save CV to Cloud Firestore (keyed by UID) with localStorage offline fallback
-export function saveCV(silent = false) {
+// Save CV after checking Firebase Auth state (Firestore users/{uid}/cv/main vs guest temporary local copy)
+export async function saveCV(silent = false) {
+  saveCurrentStepInputs();
   cvState.data.lastSaved = new Date().toISOString();
 
-  // Offline / instant fallback cache
+  const user = await getCurrentAuthUser();
+  const isSignedIn = Boolean(user && user.emailVerified);
+  const localKey = isSignedIn ? `tima_cv_${user.uid}` : getCVStorageKey();
+
+  // Local cache backup
   try {
-    localStorage.setItem(getCVStorageKey(), JSON.stringify(cvState.data));
+    localStorage.setItem(localKey, JSON.stringify(cvState.data));
   } catch (e) {
     console.warn('CV fallback local cache warning:', e);
   }
 
-  // Sync with Tima Card stats automatically!
+  // Sync with Tima Card stats automatically
   syncCVWithTimaCard();
-
-  // Persist to Cloud Firestore keyed by UID
-  syncUserCVToCloud(cvState.data)
-    .then((synced) => {
-      if (!silent) {
-        if (synced) {
-          showToast('تم حفظ بيانات السيرة الذاتية في سحابة Firestore بنجاح! ☁️✨');
-        } else {
-          showToast('تم حفظ السيرة الذاتية محلياً (سجّل دخول Google للمزامنة السحابية) 💾');
-        }
-      }
-    })
-    .catch((err) => {
-      console.warn('Cloud CV save failed, fallback local cache preserved:', err);
-      if (!silent) {
-        showToast('تعذر الحفظ السحابي مؤقتاً — تم الاحتفاظ بالبيانات محلياً كنسخة احتياطية ⚠️');
-      }
-    });
-
   renderCVPreview();
+
+  if (!isSignedIn) {
+    try {
+      localStorage.setItem(GUEST_PENDING_CV_KEY, '1');
+    } catch (_) {}
+    if (!silent) {
+      showToast('اتحفظت نسخة مؤقتة على جهازك. سجل دخول بجوجل عشان تتحفظ في حسابك وتوصلها من أي جهاز', {
+        type: 'warning',
+        showLoginAction: true,
+        duration: 7500
+      });
+    }
+    return false;
+  }
+
+  // Signed in: persist to Firestore under users/{uid}/cv/main
+  try {
+    const synced = await syncUserCVToCloud(cvState.data, user);
+    if (synced) {
+      try {
+        localStorage.removeItem(GUEST_PENDING_CV_KEY);
+        localStorage.removeItem('tima_cv_guest_student@phitomedia.eg');
+      } catch (_) {}
+      if (!silent) {
+        showToast('تم حفظ بياناتك في حسابك ✅', { type: 'success' });
+      }
+      return true;
+    }
+  } catch (err) {
+    console.warn('Cloud CV save failed, fallback local cache preserved:', err);
+  }
+
+  try {
+    localStorage.setItem(GUEST_PENDING_CV_KEY, '1');
+  } catch (_) {}
+  if (!silent) {
+    showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', {
+      type: 'warning',
+      duration: 6000
+    });
+  }
+  return false;
 }
 
 // Sync CV with Tima Card: skills in CV auto update Tima stats
@@ -520,25 +552,80 @@ export function savePortfolio(itemTitleForToast = '') {
   return success;
 }
 
-// Show toast notification
-export function showToast(message) {
+// Show toast notification (supports interactive Google Sign-In action button)
+export function showToast(message, options = {}) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const type = opts.type || 'info';
+  const showLoginAction = Boolean(opts.showLoginAction);
+  const duration = Number(opts.duration) || (showLoginAction ? 7500 : 3800);
+
   let toast = document.getElementById('tima-global-toast');
   if (!toast) {
     toast = document.createElement('div');
     toast.id = 'tima-global-toast';
-    toast.className = 'fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-[#1E1B4B] text-white px-6 py-3.5 rounded-2xl shadow-2xl border border-pink-500/40 text-xs sm:text-sm font-bold flex items-center gap-3 transition-all duration-300 opacity-0 pointer-events-none transform translate-y-4';
     document.body.appendChild(toast);
   }
 
-  toast.innerHTML = `<span class="w-2.5 h-2.5 rounded-full bg-[#EC4899] animate-ping"></span><span>${message}</span>`;
+  const borderTheme = type === 'success'
+    ? 'border-emerald-400/60 bg-[#0F2922]'
+    : type === 'warning'
+      ? 'border-amber-400/70 bg-[#1E1B4B]'
+      : 'border-pink-500/40 bg-[#1E1B4B]';
+
+  toast.className = `fixed bottom-6 sm:bottom-10 left-1/2 -translate-x-1/2 z-[9998] max-w-xl w-[92vw] sm:w-auto text-white px-5 py-3.5 rounded-2xl shadow-2xl border ${borderTheme} text-xs sm:text-sm font-bold flex flex-wrap items-center justify-between gap-3 transition-all duration-300 opacity-0 pointer-events-none transform translate-y-4`;
+  toast.innerHTML = '';
+
+  const leftWrap = document.createElement('div');
+  leftWrap.className = 'flex items-center gap-2.5 flex-1 min-w-[200px]';
+
+  const dot = document.createElement('span');
+  dot.className = `w-2.5 h-2.5 rounded-full shrink-0 ${type === 'success' ? 'bg-emerald-400' : type === 'warning' ? 'bg-amber-400 animate-pulse' : 'bg-[#EC4899] animate-ping'}`;
+
+  const msgSpan = document.createElement('span');
+  msgSpan.className = 'leading-relaxed';
+  msgSpan.textContent = message;
+
+  leftWrap.appendChild(dot);
+  leftWrap.appendChild(msgSpan);
+  toast.appendChild(leftWrap);
+
+  const actionsWrap = document.createElement('div');
+  actionsWrap.className = 'flex items-center gap-2 shrink-0';
+
+  if (showLoginAction) {
+    const loginBtn = document.createElement('button');
+    loginBtn.type = 'button';
+    loginBtn.className = 'px-3.5 py-1.5 rounded-xl bg-white text-[#1E1B4B] hover:bg-purple-100 font-black text-xs shadow-sm transition-all cursor-pointer flex items-center gap-1.5';
+    loginBtn.textContent = 'تسجيل الدخول بجوجل';
+    loginBtn.onclick = () => {
+      toast.classList.remove('opacity-100', 'translate-y-0', 'pointer-events-auto');
+      toast.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
+      if (window.phiApp && typeof window.phiApp.loginWithGoogleQuick === 'function') {
+        window.phiApp.loginWithGoogleQuick();
+      }
+    };
+    actionsWrap.appendChild(loginBtn);
+  }
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-black cursor-pointer';
+  closeBtn.textContent = '✕';
+  closeBtn.onclick = () => {
+    toast.classList.remove('opacity-100', 'translate-y-0', 'pointer-events-auto');
+    toast.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
+  };
+  actionsWrap.appendChild(closeBtn);
+  toast.appendChild(actionsWrap);
+
   toast.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-4');
-  toast.classList.add('opacity-100', 'translate-y-0');
+  toast.classList.add('opacity-100', 'pointer-events-auto', 'translate-y-0');
 
   clearTimeout(toast._timeout);
   toast._timeout = setTimeout(() => {
-    toast.classList.remove('opacity-100', 'translate-y-0');
+    toast.classList.remove('opacity-100', 'translate-y-0', 'pointer-events-auto');
     toast.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
-  }, 3500);
+  }, duration);
 }
 
 // -------------------------------------------------------------
@@ -2249,7 +2336,7 @@ export function handlePortfolioFileUpload(event) {
   renderAddWorkModal();
 }
 
-export function submitNewPortfolioWork() {
+export async function submitNewPortfolioWork() {
   const tab = portfolioState.modalTab;
   let workItem = null;
 
@@ -2331,26 +2418,59 @@ export function submitNewPortfolioWork() {
     portfolioState.newFileItem.title = '';
   }
 
+  const user = await getCurrentAuthUser();
+  const isSignedIn = Boolean(user && user.emailVerified);
+
   // Add work to user's private items
   portfolioState.items.unshift(workItem);
 
   // Contributing to Tima points: each work = +15 points
   addTimaPoints(15, `إضافة عمل جديد للبورتفوليو: ${workItem.title}`);
 
-  const saved = savePortfolio(workItem.title);
-  if (saved) {
-    closeAddWorkModal();
-    syncPortfolioItemCreateToCloud({
-      ...workItem,
-      studentName: state.currentUser?.name || state.timaCard?.name || 'طالب إعلام'
-    }).catch((err) => {
-      console.warn('Portfolio cloud sync error:', err);
-    });
-  } else {
-    // Rollback if storage failed
+  const saved = savePortfolio('');
+  if (!saved) {
     portfolioState.items.shift();
     renderPortfolioSection();
+    return;
   }
+
+  closeAddWorkModal();
+
+  if (!isSignedIn) {
+    try {
+      localStorage.setItem(GUEST_PENDING_PORTFOLIO_KEY, '1');
+    } catch (_) {}
+    showToast('اتحفظت نسخة مؤقتة على جهازك. سجل دخول بجوجل عشان تتحفظ في حسابك وتوصلها من أي جهاز', {
+      type: 'warning',
+      showLoginAction: true,
+      duration: 7500
+    });
+    return;
+  }
+
+  try {
+    const synced = await syncPortfolioItemCreateToCloud(
+      {
+        ...workItem,
+        studentName: state.currentUser?.name || user.displayName || state.timaCard?.name || 'طالب إعلام'
+      },
+      user
+    );
+    if (synced) {
+      showToast('تم حفظ بياناتك في حسابك ✅', { type: 'success' });
+      return;
+    }
+  } catch (err) {
+    console.warn('Portfolio cloud sync error:', err);
+  }
+
+  try {
+    localStorage.setItem(GUEST_PENDING_PORTFOLIO_KEY, '1');
+  } catch (_) {}
+  showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', {
+    type: 'warning',
+    duration: 6000
+  });
 }
 
 let pendingDeleteId = null;

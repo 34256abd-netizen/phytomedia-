@@ -5,7 +5,7 @@ import DownloadCVButton from './src/components/DownloadCVButton';
 import MentorPaymentGateway from './src/components/MentorPaymentGateway';
 import { INITIAL_DATA } from './data.js';
 import { loadFromLocalStorage, saveToLocalStorage } from './backup-localStorage.js';
-import { getFirebaseAuthErrorMessage } from './src/firebase.ts';
+import { getFirebaseAuthErrorMessage, getCurrentAuthUser } from './src/firebase.ts';
 import {
   initFirebaseBridge,
   ensureGoogleAuth,
@@ -14,6 +14,15 @@ import {
   isFirebaseAdminUser,
   getFirebaseAuthStateSnapshot,
   hydrateUserWorkspaceFromCloud,
+  migrateGuestLocalDataToCloud,
+  queueGuestPendingItem,
+  GUEST_PENDING_PROGRESS_KEY,
+  GUEST_PENDING_RATINGS_KEY,
+  GUEST_PENDING_SUBMISSIONS_KEY,
+  GUEST_PENDING_JOBS_KEY,
+  GUEST_PENDING_APPS_KEY,
+  GUEST_PENDING_BOOKINGS_KEY,
+  GUEST_PENDING_REPORTS_KEY,
   syncStudentRegistrationToCloud,
   syncAdminAddedStudentToCloud,
   syncStudentProgressToCloud,
@@ -286,7 +295,23 @@ export function updateCloudAuthBadges() {
   }
 }
 
-function showAuthBanner(message, type = 'error') {
+const MSG_CLOUD_SAVED = 'تم حفظ بياناتك في حسابك ✅';
+const MSG_GUEST_LOCAL_SAVED = 'اتحفظت نسخة مؤقتة على جهازك. سجل دخول بجوجل عشان تتحفظ في حسابك وتوصلها من أي جهاز';
+
+function saveGuestProgressSnapshot() {
+  try {
+    localStorage.setItem(GUEST_PENDING_PROGRESS_KEY, JSON.stringify({
+      overall: state.timaCard?.overall || 0,
+      timaStats: state.timaCard?.stats || {},
+      totalPoints: state.totalPoints || 0,
+      works: (portfolioState && portfolioState.items) ? portfolioState.items.length : 0,
+      customTheme: state.customTheme || 'cosmic'
+    }));
+  } catch (_) {}
+}
+
+function showAuthBanner(message, type = 'error', options = {}) {
+  const opts = (options && typeof options === 'object') ? options : {};
   let banner = document.getElementById('phi-auth-banner');
   if (!banner) {
     banner = document.createElement('div');
@@ -296,15 +321,33 @@ function showAuthBanner(message, type = 'error') {
   const palette =
     type === 'success'
       ? 'bg-emerald-950/95 text-emerald-100 border-emerald-500/60'
-      : type === 'info'
-        ? 'bg-indigo-950/95 text-indigo-100 border-purple-400/60'
-        : 'bg-rose-950/95 text-rose-100 border-rose-500/70';
-  banner.className = `fixed top-4 left-1/2 -translate-x-1/2 z-[9999] max-w-lg w-[92vw] px-4 py-3 rounded-2xl border shadow-2xl text-xs sm:text-sm font-bold flex items-center justify-between gap-3 backdrop-blur-md transition-all duration-200 ${palette}`;
+      : type === 'warning'
+        ? 'bg-amber-950/95 text-amber-100 border-amber-400/70'
+        : type === 'info'
+          ? 'bg-indigo-950/95 text-indigo-100 border-purple-400/60'
+          : 'bg-rose-950/95 text-rose-100 border-rose-500/70';
+  banner.className = `fixed top-4 left-1/2 -translate-x-1/2 z-[9999] max-w-xl w-[92vw] px-4 py-3 rounded-2xl border shadow-2xl text-xs sm:text-sm font-bold flex flex-wrap items-center justify-between gap-3 backdrop-blur-md transition-all duration-200 ${palette}`;
   banner.innerHTML = '';
 
   const textSpan = document.createElement('span');
-  textSpan.className = 'leading-relaxed';
+  textSpan.className = 'leading-relaxed flex-1 min-w-[180px]';
   textSpan.textContent = message;
+  banner.appendChild(textSpan);
+
+  const actions = document.createElement('div');
+  actions.className = 'flex items-center gap-2 shrink-0';
+
+  if (opts.showLoginAction) {
+    const loginBtn = document.createElement('button');
+    loginBtn.type = 'button';
+    loginBtn.className = 'px-3 py-1.5 rounded-xl bg-white text-[#1E1B4B] hover:bg-purple-100 text-xs font-black cursor-pointer';
+    loginBtn.textContent = 'تسجيل الدخول بجوجل';
+    loginBtn.onclick = () => {
+      banner.classList.add('hidden');
+      loginWithGoogleQuick();
+    };
+    actions.appendChild(loginBtn);
+  }
 
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
@@ -313,15 +356,16 @@ function showAuthBanner(message, type = 'error') {
   closeBtn.onclick = () => {
     banner.classList.add('hidden');
   };
+  actions.appendChild(closeBtn);
 
-  banner.appendChild(textSpan);
-  banner.appendChild(closeBtn);
+  banner.appendChild(actions);
   banner.classList.remove('hidden');
 
   clearTimeout(banner._hideTimer);
+  const timeoutMs = Number(opts.duration) || (type === 'error' ? 7500 : 4500);
   banner._hideTimer = setTimeout(() => {
     banner.classList.add('hidden');
-  }, type === 'error' ? 7500 : 4500);
+  }, timeoutMs);
 }
 
 export async function connectGoogleForSignup() {
@@ -336,7 +380,12 @@ export async function connectGoogleForSignup() {
       nameInput.value = user.displayName;
     }
     updateCloudAuthBadges();
-    showAuthBanner(`تم ربط حساب Google (${user.email}) بنجاح ☁️`, 'success');
+    const mig = await migrateGuestLocalDataToCloud(user).catch(() => ({ migratedCount: 0, migratedTypes: [] }));
+    if (mig.migratedCount > 0) {
+      showAuthBanner(`${MSG_CLOUD_SAVED} — تم نقل بياناتك المحلية تلقائياً إلى حسابك`, 'success');
+    } else {
+      showAuthBanner(`تم ربط حساب Google (${user.email}) بنجاح ☁️`, 'success');
+    }
   } catch (err) {
     console.warn('Google signup connect cancelled or failed:', err);
     const friendly = getFirebaseAuthErrorMessage(err);
@@ -372,19 +421,31 @@ export async function loginWithGoogleQuick() {
       return;
     }
 
-    showAuthBanner(`✓ أهلاً بك (${user.displayName || user.email})! جاري استعادة ملفك من Firestore...`, 'info');
+    showAuthBanner(`✓ أهلاً بك (${user.displayName || user.email})! جاري استعادة ومزامنة بياناتك...`, 'info');
     const hydration = await hydrateUserWorkspaceFromCloud(user);
     if (hydration.fallbackUsed) {
       loadCVAndPortfolio();
       showAuthBanner('⚠️ تعذر الوصول إلى Firestore لحظياً — تم تحميل النسخة الاحتياطية المحلية.', 'info');
     }
 
+    const migratedNote = hydration.migratedCount > 0 ? ' وتم نسخ بياناتك المحلية إلى Firestore تلقائياً ✅' : '';
+
     if (state.currentUser && state.currentUser.uid === user.uid) {
       saveToStorage();
       if (state.currentUser.role === 'mentor') navigateView('mentor-app');
       else if (state.currentUser.role === 'company') navigateView('company-app');
       else navigateView('student-app');
-      showAuthBanner(`✓ تم استعادة حسابك وبياناتك بنجاح (${user.email}) ☁️`, 'success');
+      if (hydration.migratedCount > 0) {
+        showToast(MSG_CLOUD_SAVED, { type: 'success' });
+      }
+      showAuthBanner(`✓ تم استعادة حسابك وبياناتك بنجاح (${user.email})${migratedNote}`, 'success');
+    } else if (hydration.migratedCount > 0) {
+      // Guest already saved CV/Portfolio locally before logging in: stay/route to student workspace with their migrated data!
+      renderCVStepForm();
+      renderCVPreview();
+      renderPortfolioSection();
+      showToast(MSG_CLOUD_SAVED, { type: 'success' });
+      showAuthBanner(`✓ تم حفظ بياناتك ونقلها إلى حسابك (${user.email}) ✅`, 'success');
     } else {
       navigateView('role-select');
       showAuthBanner(`✓ تم تسجيل الدخول بحساب Google (${user.email}) — اختر دورك لإكمال ملفك.`, 'info');
@@ -441,17 +502,41 @@ export async function loginAdminWithGoogle() {
   }
 }
 
-function pushCurrentStudentProgress() {
-  if (!state.currentUser || state.currentUser.role !== 'student' || !state.currentUser.id) return;
-  syncStudentProgressToCloud(state.currentUser.id, {
-    overall: state.timaCard?.overall || 0,
-    timaStats: state.timaCard?.stats || {},
-    totalPoints: state.totalPoints || 0,
-    works: (portfolioState && portfolioState.items) ? portfolioState.items.length : 0,
-    customTheme: state.customTheme || 'cosmic'
-  }).catch((err) => {
+async function pushCurrentStudentProgress(explicitUser = null) {
+  const user = explicitUser || (await getCurrentAuthUser());
+  if (!user || !user.emailVerified) {
+    saveGuestProgressSnapshot();
+    return 'guest';
+  }
+  if (!state.currentUser || state.currentUser.role !== 'student' || !state.currentUser.id) {
+    saveGuestProgressSnapshot();
+    return 'no_profile';
+  }
+  try {
+    const synced = await syncStudentProgressToCloud(
+      state.currentUser.id,
+      {
+        overall: state.timaCard?.overall || 0,
+        timaStats: state.timaCard?.stats || {},
+        totalPoints: state.totalPoints || 0,
+        works: (portfolioState && portfolioState.items) ? portfolioState.items.length : 0,
+        customTheme: state.customTheme || 'cosmic'
+      },
+      user
+    );
+    if (synced) {
+      try {
+        localStorage.removeItem(GUEST_PENDING_PROGRESS_KEY);
+      } catch (_) {}
+      return 'synced';
+    }
+    saveGuestProgressSnapshot();
+    return 'no_profile';
+  } catch (err) {
     console.warn('Student progress cloud sync skipped:', err);
-  });
+    saveGuestProgressSnapshot();
+    return 'offline';
+  }
 }
 
 function loadFromStorage() {
@@ -1736,7 +1821,7 @@ export function setTimaPoints(targetPts) {
   renderLeaderboard();
 }
 
-export function triggerPrestige() {
+export async function triggerPrestige() {
   const lvlInfo = getInfiniteLevel(state.totalPoints);
   if (lvlInfo.level < 50) {
     alert(`تتطلب ميزة الـ Prestige الوصول إلى المستوى 50 على الأقل.\nمستواك الحالي هو ${lvlInfo.level} (متبقي ${50 - lvlInfo.level} مستويات). استمر في المعمل!`);
@@ -1748,18 +1833,32 @@ export function triggerPrestige() {
     state.prestigeCount = (state.prestigeCount || 0) + 1;
     state.totalPoints = 3000; // resets to base of infinite levels
     saveToStorage();
-    pushCurrentStudentProgress();
     updateTimaCardUI();
     renderLeaderboard();
+    const syncStatus = await pushCurrentStudentProgress();
+    if (syncStatus === 'synced') {
+      showToast(MSG_CLOUD_SAVED, { type: 'success' });
+    } else if (syncStatus === 'offline') {
+      showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
+    } else {
+      showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 7500 });
+    }
     alert(`👑 تهانينا! أصبحت الآن صاحب شارة Prestige ${state.prestigeCount}! شارتك الذهبية مخلدة الآن في تاريخ إعلام مصر.`);
   }
 }
 
-export function setCustomCardTheme(themeName) {
+export async function setCustomCardTheme(themeName) {
   state.customTheme = themeName;
   saveToStorage();
-  pushCurrentStudentProgress();
   updateTimaCardUI();
+  const syncStatus = await pushCurrentStudentProgress();
+  if (syncStatus === 'synced') {
+    showToast(MSG_CLOUD_SAVED, { type: 'success' });
+  } else if (syncStatus === 'offline') {
+    showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
+  } else {
+    showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 7500 });
+  }
 }
 
 // -------------------------------------------------------------
@@ -1998,7 +2097,14 @@ export async function evaluateTimaCard(workText) {
 
     updateTimaCardUI();
     saveToStorage();
-    pushCurrentStudentProgress();
+    const syncStatus = await pushCurrentStudentProgress();
+    if (syncStatus === 'synced') {
+      showToast(MSG_CLOUD_SAVED, { type: 'success' });
+    } else if (syncStatus === 'offline') {
+      showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
+    } else {
+      showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 7500 });
+    }
 
     const feedbackBox = document.getElementById('tima-ai-feedback-box');
     if (feedbackBox) {
@@ -2182,8 +2288,11 @@ export function openMentorPaymentGateway(mentor, sessionDetails) {
     document.body.appendChild(container);
   }
 
-  const handleSuccess = (receipt) => {
+  const handleSuccess = async (receipt) => {
     unmountReactComponent(container);
+    const user = await getCurrentAuthUser();
+    const isSignedIn = Boolean(user && user.emailVerified);
+
     const newBooking = {
       id: receipt?.transactionId || `book-${Date.now()}`,
       mentorId: mentor.id,
@@ -2202,12 +2311,26 @@ export function openMentorPaymentGateway(mentor, sessionDetails) {
     mentor.earnings = (mentor.earnings || 0) + mentor.price;
     mentor.sessionsCount = (mentor.sessionsCount || 0) + 1;
     saveToStorage();
-    syncBookingCreateToCloud(newBooking).catch((err) => {
-      console.warn('Booking cloud sync skipped:', err);
-    });
-
     closeBookingModal();
     openMentorRoom(mentor.id, newBooking);
+
+    if (!isSignedIn) {
+      queueGuestPendingItem(GUEST_PENDING_BOOKINGS_KEY, newBooking);
+      showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 7500 });
+      return;
+    }
+
+    try {
+      const synced = await syncBookingCreateToCloud(newBooking, user);
+      if (synced) {
+        showToast(MSG_CLOUD_SAVED, { type: 'success' });
+        return;
+      }
+    } catch (err) {
+      console.warn('Booking cloud sync skipped:', err);
+    }
+    queueGuestPendingItem(GUEST_PENDING_BOOKINGS_KEY, newBooking);
+    showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
   };
 
   const handleClose = () => {
@@ -2544,7 +2667,7 @@ if (typeof window !== 'undefined') {
 // -------------------------------------------------------------
 // COMPANY DASHBOARD ACTIONS
 // -------------------------------------------------------------
-export function createCompanyJob() {
+export async function createCompanyJob() {
   const title = document.getElementById('job-create-title')?.value.trim();
   const desc = document.getElementById('job-create-desc')?.value.trim();
   const type = document.getElementById('job-create-type')?.value || 'تدريب';
@@ -2556,6 +2679,9 @@ export function createCompanyJob() {
     alert('من فضلك املأ عنوان الفرصة ووصفها.');
     return;
   }
+
+  const user = await getCurrentAuthUser();
+  const isSignedIn = Boolean(user && user.emailVerified);
 
   const newJob = {
     id: `job-${Date.now()}`,
@@ -2575,9 +2701,25 @@ export function createCompanyJob() {
 
   state.jobs.unshift(newJob);
   saveToStorage();
-  syncJobCreateToCloud(newJob).catch((err) => console.warn('Job cloud sync error:', err));
   renderApp();
-  alert('تم نشر فرصة العمل/التدريب بنجاح! يمكن للطلبة أصحاب بطاقات Tima التقديم الآن. 🎯');
+
+  if (!isSignedIn) {
+    queueGuestPendingItem(GUEST_PENDING_JOBS_KEY, newJob);
+    showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 7500 });
+    return;
+  }
+
+  try {
+    const synced = await syncJobCreateToCloud(newJob, user);
+    if (synced) {
+      showToast(MSG_CLOUD_SAVED, { type: 'success' });
+      return;
+    }
+  } catch (err) {
+    console.warn('Job cloud sync error:', err);
+  }
+  queueGuestPendingItem(GUEST_PENDING_JOBS_KEY, newJob);
+  showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
 }
 
 export function filterTalentPool() {
@@ -2596,7 +2738,7 @@ export function contactStudent(studentId) {
   alert(`تم نسخ بريد الطالب (${student.name}):\n${student.email}\nيمكنك الآن إرسال عرض المقابلة أو التدريب مباشرة.`);
 }
 
-export function applyToJob(jobId) {
+export async function applyToJob(jobId) {
   const job = state.jobs.find(j => j.id === jobId);
   if (!job) return;
 
@@ -2605,6 +2747,9 @@ export function applyToJob(jobId) {
     alert(`عذراً، تشترط هذه الفرصة الحصول على مهارة (${job.minSkill}) بحد أدنى ${job.minScore} في بطاقة Tima.\nدرجتك الحالية هي ${currentScore}. حسّن مهارتك في المعمل وشارك مجدداً!`);
     return;
   }
+
+  const user = await getCurrentAuthUser();
+  const isSignedIn = Boolean(user && user.emailVerified);
 
   const newApp = {
     id: `app-${Date.now()}`,
@@ -2623,9 +2768,25 @@ export function applyToJob(jobId) {
   state.applications.unshift(newApp);
   job.applicantsCount = (job.applicantsCount || 0) + 1;
   saveToStorage();
-  syncApplicationCreateToCloud(newApp, job.applicantsCount).catch((err) => console.warn('Application cloud sync error:', err));
-  alert(`تهانينا! تم التقديم بنجاح على "${job.title}". ستصل بطاقتك Tima والبورتفوليو إلى الشركة فوراً.`);
   renderApp();
+
+  if (!isSignedIn) {
+    queueGuestPendingItem(GUEST_PENDING_APPS_KEY, { appItem: newApp, newApplicantsCount: job.applicantsCount });
+    showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 7500 });
+    return;
+  }
+
+  try {
+    const synced = await syncApplicationCreateToCloud(newApp, job.applicantsCount, user);
+    if (synced) {
+      showToast(MSG_CLOUD_SAVED, { type: 'success' });
+      return;
+    }
+  } catch (err) {
+    console.warn('Application cloud sync error:', err);
+  }
+  queueGuestPendingItem(GUEST_PENDING_APPS_KEY, { appItem: newApp, newApplicantsCount: job.applicantsCount });
+  showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
 }
 
 // -------------------------------------------------------------
@@ -2911,10 +3072,47 @@ export async function submitLabWork() {
     }
 
     saveToStorage();
-    pushCurrentStudentProgress();
-    syncSubmissionCreateToCloud(newSub, typeof challenge?.submissionsCount === 'number' ? challenge.submissionsCount : undefined).catch(() => {});
     updateTimaCardUI();
     renderLabSubmissions();
+
+    const authUser = await getCurrentAuthUser();
+    const isSignedIn = Boolean(authUser && authUser.emailVerified);
+    let savedToCloud = false;
+
+    if (isSignedIn) {
+      try {
+        const subSynced = await syncSubmissionCreateToCloud(
+          newSub,
+          typeof challenge?.submissionsCount === 'number' ? challenge.submissionsCount : undefined,
+          authUser
+        );
+        await pushCurrentStudentProgress(authUser);
+        if (subSynced) {
+          savedToCloud = true;
+          showToast(MSG_CLOUD_SAVED, { type: 'success' });
+        } else {
+          queueGuestPendingItem(GUEST_PENDING_SUBMISSIONS_KEY, {
+            sub: newSub,
+            challengeSubmissionsCount: typeof challenge?.submissionsCount === 'number' ? challenge.submissionsCount : undefined
+          });
+          showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
+        }
+      } catch (err) {
+        console.warn('Lab submission cloud sync error:', err);
+        queueGuestPendingItem(GUEST_PENDING_SUBMISSIONS_KEY, {
+          sub: newSub,
+          challengeSubmissionsCount: typeof challenge?.submissionsCount === 'number' ? challenge.submissionsCount : undefined
+        });
+        showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
+      }
+    } else {
+      saveGuestProgressSnapshot();
+      queueGuestPendingItem(GUEST_PENDING_SUBMISSIONS_KEY, {
+        sub: newSub,
+        challengeSubmissionsCount: typeof challenge?.submissionsCount === 'number' ? challenge.submissionsCount : undefined
+      });
+      showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 8000 });
+    }
 
     // Reset inputs
     if (contentInput) contentInput.value = '';
@@ -2927,6 +3125,12 @@ export async function submitLabWork() {
       ? `تم تعديل مهارة (${skillArabic}) بمقدار (${deltaSign}) وتحديث الـ OVR لبطاقتك إلى (${newOvr})!`
       : `لم يتغير تقييم المهارة بسبب حصولك على تقييم متوسط (${score}/100).`;
 
+    const storageNotice = savedToCloud
+      ? 'تم حفظ بياناتك في حسابك ✅ وإضافتها لقائمة الأعمال المقيّمة.'
+      : isSignedIn
+        ? 'تم الاحتفاظ بنسخة مؤقتة على جهازك للمزامنة عند استقرار الاتصال.'
+        : MSG_GUEST_LOCAL_SAVED;
+
     alert(`📊 نتيجة التدقيق الصحفي الصارم:
 • الدرجة المستحقة: ${score}/100 (${reqMet ? 'استوفى الشروط' : 'لم يستوفِ الشروط بدقة'})
 • أثر البطاقة: ${impactMsg}
@@ -2934,7 +3138,7 @@ export async function submitLabWork() {
   1- ${mistakes[0]}
   2- ${mistakes[1]}
   3- ${mistakes[2]}
-${link ? '• تم فحص الرابط المرفق وقراءته عبر urlContext.\n' : ''}تم حفظ التقرير وإضافته لقائمة الأعمال المقيّمة.`);
+${link ? '• تم فحص الرابط المرفق وقراءته عبر urlContext.\n' : ''}${storageNotice}`);
 
   } catch (err) {
     console.error('Challenge submission error:', err);
@@ -4769,7 +4973,7 @@ export function removeReportScreenshot() {
   if (prevBox) prevBox.classList.add('hidden');
 }
 
-export function submitReport() {
+export async function submitReport() {
   const reportedId = document.getElementById('report-target-id')?.value || state.activeReportTarget?.id;
   const reason = document.getElementById('report-reason-select')?.value || 'حساب وهمي';
   const desc = document.getElementById('report-description-input')?.value.trim();
@@ -4783,8 +4987,9 @@ export function submitReport() {
     return;
   }
 
-  // Exact required structure:
-  // Save to localStorage tima_reports = [{reportedId, reason, date, status:'pending'}]
+  const user = await getCurrentAuthUser();
+  const isSignedIn = Boolean(user && user.emailVerified);
+
   const newReport = {
     id: `rep-${Date.now()}`,
     reportedId: reportedId,
@@ -4799,21 +5004,30 @@ export function submitReport() {
 
   state.reports.unshift(newReport);
   saveToStorage();
-  syncReportCreateToCloud(newReport).catch(() => {});
-
-  // Evaluate auto block:
   const isFrozen = checkAndApplyAutoBlock(reportedId);
   closeReportModal();
+  renderApp();
 
-  if (isFrozen) {
-    alert('🚨 شكراً لإبلاغك! وصل عدد البلاغات ضد هذا الحساب إلى 3 بلاغات، وتم تجميد حسابه آلياً وإخفاؤه من جميع القوائم في المنصة.');
-  } else {
-    const totalCount = state.reports.filter(r => r.reportedId == reportedId && r.status !== 'rejected').length;
-    const remaining = Math.max(0, 3 - totalCount);
-    alert(`✓ تم إرسال البلاغ بنجاح للإدارة لمراجعته.\n(متبقي ${remaining} بلاغ للتجميد الآلي الفوري للحساب).`);
+  if (!isSignedIn) {
+    queueGuestPendingItem(GUEST_PENDING_REPORTS_KEY, newReport);
+    showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 7500 });
+    return;
   }
 
-  renderApp();
+  try {
+    const synced = await syncReportCreateToCloud(newReport, user);
+    if (synced) {
+      showToast(MSG_CLOUD_SAVED, { type: 'success' });
+      if (isFrozen) {
+        showAuthBanner('🚨 وصل عدد البلاغات إلى 3 بلاغات، وتم تجميد الحساب آلياً.', 'info');
+      }
+      return;
+    }
+  } catch (err) {
+    console.warn('Report cloud sync error:', err);
+  }
+  queueGuestPendingItem(GUEST_PENDING_REPORTS_KEY, newReport);
+  showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
 }
 
 // -------------------------------------------------------------
@@ -5850,7 +6064,7 @@ export function closeAdminAddChallengeModal() {
   }
 }
 
-export function submitAdminNewChallenge(e) {
+export async function submitAdminNewChallenge(e) {
   if (e && e.preventDefault) e.preventDefault();
 
   const title = document.getElementById('admin-modal-ch-title')?.value.trim();
@@ -5862,6 +6076,9 @@ export function submitAdminNewChallenge(e) {
     alert('من فضلك أدخل عنوان ووصف التحدي.');
     return;
   }
+
+  const user = await getCurrentAuthUser();
+  const isAdminCloud = Boolean(user && user.emailVerified && isFirebaseAdminUser(user));
 
   const newCh = {
     id: `ch-${Date.now()}`,
@@ -5876,13 +6093,25 @@ export function submitAdminNewChallenge(e) {
 
   state.challenges.unshift(newCh);
   saveToStorage();
-  syncChallengeCreateToCloud(newCh).catch(() => {});
-
   closeAdminAddChallengeModal();
   renderAdminChallengesTable();
   renderAdminApp();
 
-  alert(`🏆 تم نشر التحدي الجديد (${title}) بنجاح في معمل تدريب الطلاب!\nمرتبط بمنح +${points} نقطة TIMA XP للمشاركين.`);
+  if (!isAdminCloud) {
+    showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 7500 });
+    return;
+  }
+
+  try {
+    const synced = await syncChallengeCreateToCloud(newCh);
+    if (synced) {
+      showToast(MSG_CLOUD_SAVED, { type: 'success' });
+      return;
+    }
+  } catch (err) {
+    console.warn('Challenge cloud sync error:', err);
+  }
+  showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
 }
 
 export function deleteAdminChallenge(challengeId) {
@@ -6391,7 +6620,7 @@ export function renderAdminBlacklistIps() {
   `).join('');
 }
 
-export function addIpToBlacklist() {
+export async function addIpToBlacklist() {
   const ipInput = document.getElementById('admin-new-ip');
   const reasonInput = document.getElementById('admin-new-ip-reason');
   const ip = ipInput?.value.trim();
@@ -6401,6 +6630,9 @@ export function addIpToBlacklist() {
     alert('من فضلك أدخل عنوان IP صالح للحظر.');
     return;
   }
+
+  const user = await getCurrentAuthUser();
+  const isAdminCloud = Boolean(user && user.emailVerified && isFirebaseAdminUser(user));
 
   const newEntry = {
     id: ip,
@@ -6412,12 +6644,25 @@ export function addIpToBlacklist() {
   state.blacklistIps.unshift(newEntry);
 
   saveToStorage();
-  syncBlacklistIpAddToCloud(newEntry).catch(() => {});
   if (ipInput) ipInput.value = '';
   if (reasonInput) reasonInput.value = '';
-
-  alert(`✓ تم حظر عنوان الـ IP (${ip}) بنجاح وإضافته للقائمة السوداء لمنع الدخول.`);
   renderAdminProtectionTab();
+
+  if (!isAdminCloud) {
+    showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 7500 });
+    return;
+  }
+
+  try {
+    const synced = await syncBlacklistIpAddToCloud(newEntry);
+    if (synced) {
+      showToast(MSG_CLOUD_SAVED, { type: 'success' });
+      return;
+    }
+  } catch (err) {
+    console.warn('Blacklist IP cloud sync error:', err);
+  }
+  showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
 }
 
 export function removeIpFromBlacklist(ip) {
@@ -6548,7 +6793,7 @@ export function setSelectedRating(score) {
   }
 }
 
-export function submitMentorRating() {
+export async function submitMentorRating() {
   const mentorIdInput = document.getElementById('rating-mentor-id');
   const bookingIdInput = document.getElementById('rating-booking-id');
   const scoreInput = document.getElementById('rating-score-value');
@@ -6570,11 +6815,14 @@ export function submitMentorRating() {
     return;
   }
 
+  const user = await getCurrentAuthUser();
+  const isSignedIn = Boolean(user && user.emailVerified);
+
   if (!Array.isArray(mentor.reviewsList)) {
     mentor.reviewsList = getSeedReviewsForMentor(mentor.id);
   }
 
-  const studentName = state.currentUser?.name || state.timaCard.name || 'مريم حسام شريف';
+  const studentName = state.currentUser?.name || user?.displayName || state.timaCard.name || 'طالب إعلام';
 
   const newReview = {
     id: `rev-${Date.now()}`,
@@ -6604,19 +6852,51 @@ export function submitMentorRating() {
   }
 
   saveToStorage();
-  syncBookingRatingToCloud(
-    bookingId || undefined,
-    mentor.id,
-    score,
-    comment,
-    mentor.rating,
-    mentor.reviewsList,
-    mentor.sessionsCount
-  ).catch((err) => console.warn('Mentor rating cloud sync error:', err));
   closeRatingModal();
-
-  showToast('تم حفظ تقييمك ومراجعتك للمنتور بنجاح! ⭐✨');
   renderApp();
+
+  if (!isSignedIn) {
+    queueGuestPendingItem(GUEST_PENDING_RATINGS_KEY, {
+      bookingId: bookingId || undefined,
+      mentorId: mentor.id,
+      rating: score,
+      comment,
+      newAvgRating: mentor.rating,
+      reviewsList: mentor.reviewsList,
+      sessionsCount: mentor.sessionsCount
+    });
+    showToast(MSG_GUEST_LOCAL_SAVED, { type: 'warning', showLoginAction: true, duration: 7500 });
+    return;
+  }
+
+  try {
+    const synced = await syncBookingRatingToCloud(
+      bookingId || undefined,
+      mentor.id,
+      score,
+      comment,
+      mentor.rating,
+      mentor.reviewsList,
+      mentor.sessionsCount,
+      user
+    );
+    if (synced) {
+      showToast(MSG_CLOUD_SAVED, { type: 'success' });
+      return;
+    }
+  } catch (err) {
+    console.warn('Mentor rating cloud sync error:', err);
+  }
+  queueGuestPendingItem(GUEST_PENDING_RATINGS_KEY, {
+    bookingId: bookingId || undefined,
+    mentorId: mentor.id,
+    rating: score,
+    comment,
+    newAvgRating: mentor.rating,
+    reviewsList: mentor.reviewsList,
+    sessionsCount: mentor.sessionsCount
+  });
+  showToast('تعذر الاتصال بالسحابة حالياً — اتحفظت نسخة مؤقتة على جهازك لحين المزامنة ⚠️', { type: 'warning' });
 }
 
 export function openMentorReviewsModal(mentorId) {

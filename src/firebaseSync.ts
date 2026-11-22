@@ -22,8 +22,46 @@ import {
   testConnection,
   signInWithGooglePopup,
   signOutFirebase,
-  subscribeAuthState
+  subscribeAuthState,
+  getCurrentAuthUser
 } from './firebase';
+
+export const GUEST_PENDING_CV_KEY = 'phi_guest_cv_pending';
+export const GUEST_PENDING_PORTFOLIO_KEY = 'phi_guest_portfolio_pending';
+export const GUEST_PENDING_PROGRESS_KEY = 'phi_guest_progress_pending';
+export const GUEST_PENDING_RATINGS_KEY = 'phi_guest_pending_ratings_v1';
+export const GUEST_PENDING_SUBMISSIONS_KEY = 'phi_guest_pending_submissions_v1';
+export const GUEST_PENDING_JOBS_KEY = 'phi_guest_pending_jobs_v1';
+export const GUEST_PENDING_APPS_KEY = 'phi_guest_pending_apps_v1';
+export const GUEST_PENDING_BOOKINGS_KEY = 'phi_guest_pending_bookings_v1';
+export const GUEST_PENDING_REPORTS_KEY = 'phi_guest_pending_reports_v1';
+
+export function queueGuestPendingItem(storageKey: string, item: any): void {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    const list = raw ? JSON.parse(raw) : [];
+    const arr = Array.isArray(list) ? list : [];
+    arr.push(item);
+    localStorage.setItem(storageKey, JSON.stringify(arr.slice(-50)));
+  } catch (err) {
+    console.warn('Could not queue guest pending item:', err);
+  }
+}
+
+export function hasMeaningfulCVData(cv: any): boolean {
+  if (!cv || typeof cv !== 'object') return false;
+  const textFields = ['photo', 'fullName', 'jobTitle', 'email', 'phone', 'address', 'linkedin', 'summary'];
+  if (textFields.some((k) => typeof cv[k] === 'string' && cv[k].trim().length > 0)) return true;
+  if (cv.education && typeof cv.education === 'object') {
+    if (Object.values(cv.education).some((v) => typeof v === 'string' && v.trim().length > 0)) return true;
+  }
+  const listFields = ['experiences', 'mediaSkills', 'techSkills', 'certificates', 'volunteering'];
+  if (listFields.some((k) => Array.isArray(cv[k]) && cv[k].length > 0)) return true;
+  if (Array.isArray(cv.languages) && (cv.languages.length > 1 || (cv.languages[0] && cv.languages[0].name !== 'اللغة العربية'))) {
+    return true;
+  }
+  return false;
+}
 
 export const ADMIN_EMAILS = ['34256abd@gmail.com', 'phytomedia10@gmail.com'];
 
@@ -614,12 +652,13 @@ function attachOwnerListeners(user: User) {
     )
   );
 
-  // Own CV document keyed by UID
+  // Own CV document keyed by UID under users/{uid}/cv/main
   activeUnsubs.push(
     onSnapshot(
-      doc(db, 'user_cvs', uid),
+      doc(db, 'users', uid, 'cv', 'main'),
       (snap) => {
         if (!syncCvStateRef || !snap.exists()) return;
+        if (localStorage.getItem(GUEST_PENDING_CV_KEY) === '1') return;
         const remoteCV = snap.data();
         syncCvStateRef.data = {
           ...(syncCvStateRef.data || {}),
@@ -629,9 +668,12 @@ function attachOwnerListeners(user: User) {
             ...(remoteCV?.education || {})
           }
         };
+        try {
+          localStorage.setItem(`tima_cv_${uid}`, JSON.stringify(syncCvStateRef.data));
+        } catch (_) {}
         triggerHydrate();
       },
-      (err) => handleFirestoreError(err, OperationType.GET, `user_cvs/${uid}`)
+      (err) => handleFirestoreError(err, OperationType.GET, `users/${uid}/cv/main`)
     )
   );
 }
@@ -681,24 +723,262 @@ export function initFirebaseBridge(state: any, portfolioState: any, onHydrate: (
     } else {
       attachPublicListeners();
       attachOwnerListeners(user);
+      migrateGuestLocalDataToCloud(user).catch((err) => {
+        console.warn('Background guest-to-cloud migration notice:', err);
+      });
     }
     triggerHydrate();
   });
+}
+
+let migrationLockUid: string | null = null;
+
+export async function migrateGuestLocalDataToCloud(user: User): Promise<{
+  migratedCount: number;
+  migratedTypes: string[];
+}> {
+  if (!user || !user.uid || !user.emailVerified) {
+    return { migratedCount: 0, migratedTypes: [] };
+  }
+  const uid = sanitizeId(user.uid, 'uid');
+  if (migrationLockUid === uid) {
+    return { migratedCount: 0, migratedTypes: [] };
+  }
+  migrationLockUid = uid;
+  let migratedCount = 0;
+  const migratedTypes: string[] = [];
+
+  try {
+    // 1. Migrate pending Guest CV -> users/{uid}/cv/main
+    try {
+      const guestCvKey = 'tima_cv_guest_student@phitomedia.eg';
+      const guestCvRaw = localStorage.getItem(guestCvKey);
+      const isCvPending = localStorage.getItem(GUEST_PENDING_CV_KEY) === '1';
+      let candidateCv: any = null;
+
+      if (guestCvRaw) {
+        try {
+          candidateCv = JSON.parse(guestCvRaw);
+        } catch (_) {}
+      }
+      if (!hasMeaningfulCVData(candidateCv) && isCvPending && syncCvStateRef?.data) {
+        candidateCv = syncCvStateRef.data;
+      }
+
+      if ((isCvPending || guestCvRaw) && hasMeaningfulCVData(candidateCv)) {
+        const synced = await syncUserCVToCloud(candidateCv, user);
+        if (synced) {
+          localStorage.setItem(`tima_cv_${uid}`, JSON.stringify(candidateCv));
+          localStorage.removeItem(guestCvKey);
+          localStorage.removeItem(GUEST_PENDING_CV_KEY);
+          if (syncCvStateRef) {
+            syncCvStateRef.data = candidateCv;
+          }
+          migratedCount += 1;
+          migratedTypes.push('cv');
+        }
+      } else if (isCvPending) {
+        localStorage.removeItem(GUEST_PENDING_CV_KEY);
+      }
+    } catch (err) {
+      console.warn('Guest CV migration error:', err);
+    }
+
+    // 2. Migrate pending Guest Portfolio -> portfolio_items
+    try {
+      const guestPortKey = 'tima_portfolio_guest_student@phitomedia.eg';
+      const guestPortRaw = localStorage.getItem(guestPortKey);
+      const isPortPending = localStorage.getItem(GUEST_PENDING_PORTFOLIO_KEY) === '1';
+      let candidateItems: any[] = [];
+
+      if (guestPortRaw) {
+        try {
+          const parsed = JSON.parse(guestPortRaw);
+          if (Array.isArray(parsed)) candidateItems = parsed;
+        } catch (_) {}
+      }
+      if (candidateItems.length === 0 && isPortPending && Array.isArray(syncPortfolioRef?.items)) {
+        candidateItems = syncPortfolioRef.items;
+      }
+
+      if ((isPortPending || guestPortRaw) && candidateItems.length > 0) {
+        let portSynced = 0;
+        for (const item of candidateItems) {
+          if (!item || !item.id || !item.title) continue;
+          const ok = await syncPortfolioItemCreateToCloud(
+            {
+              ...item,
+              studentName: user.displayName || item.studentName || 'طالب إعلام'
+            },
+            user
+          );
+          if (ok) portSynced += 1;
+        }
+        if (portSynced > 0) {
+          const existingUidRaw = localStorage.getItem(`tima_portfolio_${uid}`);
+          const existingUidList = existingUidRaw ? JSON.parse(existingUidRaw) : [];
+          const mergedPort = mergeById(
+            Array.isArray(existingUidList) ? existingUidList : [],
+            candidateItems,
+            false
+          );
+          localStorage.setItem(`tima_portfolio_${uid}`, JSON.stringify(mergedPort));
+          localStorage.removeItem(guestPortKey);
+          localStorage.removeItem(GUEST_PENDING_PORTFOLIO_KEY);
+          migratedCount += portSynced;
+          migratedTypes.push('portfolio');
+        }
+      } else if (isPortPending) {
+        localStorage.removeItem(GUEST_PENDING_PORTFOLIO_KEY);
+      }
+    } catch (err) {
+      console.warn('Guest portfolio migration error:', err);
+    }
+
+    // 3. Migrate pending Student Progress / Theme (requires existing students record owned by UID)
+    try {
+      const progRaw = localStorage.getItem(GUEST_PENDING_PROGRESS_KEY);
+      if (progRaw) {
+        const sSnap = await getDocs(query(collection(db, 'students'), where('ownerUid', '==', uid)));
+        if (!sSnap.empty) {
+          const mine = sSnap.docs[0];
+          let parsedProg: any = {};
+          try {
+            parsedProg = progRaw === '1' ? {} : JSON.parse(progRaw);
+          } catch (_) {
+            parsedProg = {};
+          }
+          const ok = await syncStudentProgressToCloud(
+            mine.id,
+            {
+              overall: parsedProg.overall ?? syncStateRef?.timaCard?.overall,
+              timaStats: parsedProg.timaStats ?? syncStateRef?.timaCard?.stats,
+              totalPoints: parsedProg.totalPoints ?? syncStateRef?.totalPoints,
+              works: parsedProg.works ?? syncPortfolioRef?.items?.length,
+              customTheme: parsedProg.customTheme ?? syncStateRef?.customTheme
+            },
+            user
+          );
+          if (ok) {
+            localStorage.removeItem(GUEST_PENDING_PROGRESS_KEY);
+            migratedCount += 1;
+            migratedTypes.push('progress');
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Guest progress migration error:', err);
+    }
+
+    // 4. Migrate pending queue items (Ratings, Submissions, Bookings, Applications, Jobs, Reports)
+    const flushQueue = async (
+      storageKey: string,
+      typeLabel: string,
+      worker: (entry: any) => Promise<boolean>
+    ) => {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) return;
+      let items: any[] = [];
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) items = parsed;
+      } catch (_) {}
+      if (items.length === 0) {
+        localStorage.removeItem(storageKey);
+        return;
+      }
+      const remaining: any[] = [];
+      let doneHere = 0;
+      for (const entry of items) {
+        try {
+          const ok = await worker(entry);
+          if (ok) {
+            doneHere += 1;
+          } else {
+            remaining.push(entry);
+          }
+        } catch (_) {
+          remaining.push(entry);
+        }
+      }
+      if (remaining.length > 0) {
+        localStorage.setItem(storageKey, JSON.stringify(remaining));
+      } else {
+        localStorage.removeItem(storageKey);
+      }
+      if (doneHere > 0) {
+        migratedCount += doneHere;
+        migratedTypes.push(typeLabel);
+      }
+    };
+
+    await flushQueue(GUEST_PENDING_RATINGS_KEY, 'ratings', async (entry) =>
+      syncBookingRatingToCloud(
+        entry.bookingId,
+        entry.mentorId,
+        entry.rating,
+        entry.comment,
+        entry.newAvgRating,
+        entry.reviewsList,
+        entry.sessionsCount,
+        user
+      )
+    );
+
+    await flushQueue(GUEST_PENDING_SUBMISSIONS_KEY, 'submissions', async (entry) =>
+      syncSubmissionCreateToCloud(entry.sub, entry.challengeSubmissionsCount, user)
+    );
+
+    await flushQueue(GUEST_PENDING_BOOKINGS_KEY, 'bookings', async (entry) =>
+      syncBookingCreateToCloud(entry, user)
+    );
+
+    await flushQueue(GUEST_PENDING_APPS_KEY, 'applications', async (entry) =>
+      syncApplicationCreateToCloud(entry.appItem, entry.newApplicantsCount, user)
+    );
+
+    await flushQueue(GUEST_PENDING_JOBS_KEY, 'jobs', async (entry) =>
+      syncJobCreateToCloud(entry, user)
+    );
+
+    await flushQueue(GUEST_PENDING_REPORTS_KEY, 'reports', async (entry) =>
+      syncReportCreateToCloud(entry, user)
+    );
+
+    return { migratedCount, migratedTypes };
+  } finally {
+    if (migrationLockUid === uid) {
+      migrationLockUid = null;
+    }
+  }
 }
 
 export async function hydrateUserWorkspaceFromCloud(user: User): Promise<{
   foundProfile: boolean;
   role: string | null;
   fallbackUsed: boolean;
+  migratedCount: number;
+  migratedTypes: string[];
 }> {
   if (!user || !user.uid) {
-    return { foundProfile: false, role: null, fallbackUsed: true };
+    return { foundProfile: false, role: null, fallbackUsed: true, migratedCount: 0, migratedTypes: [] };
   }
   const uid = sanitizeId(user.uid, 'uid');
   let foundProfile = false;
   let detectedRole: string | null = null;
+  let migratedCount = 0;
+  let migratedTypes: string[] = [];
 
   try {
+    // 0. Auto-migrate any local guest data created prior to signing in
+    try {
+      const migRes = await migrateGuestLocalDataToCloud(user);
+      migratedCount = migRes.migratedCount;
+      migratedTypes = migRes.migratedTypes;
+    } catch (migErr) {
+      console.warn('Pre-hydration guest migration warning:', migErr);
+    }
+
     // 1. Load user account identity
     const userSnap = await getDoc(doc(db, 'users', uid));
     if (userSnap.exists() && syncStateRef) {
@@ -793,9 +1073,12 @@ export async function hydrateUserWorkspaceFromCloud(user: User): Promise<{
       }
     }
 
-    // 3. Hydrate CV keyed by UID
+    // 3. Hydrate CV keyed by UID under users/{uid}/cv/main (with legacy fallback)
     if (syncCvStateRef) {
-      const cvSnap = await getDoc(doc(db, 'user_cvs', uid));
+      let cvSnap = await getDoc(doc(db, 'users', uid, 'cv', 'main'));
+      if (!cvSnap.exists()) {
+        cvSnap = await getDoc(doc(db, 'user_cvs', uid));
+      }
       if (cvSnap.exists()) {
         const remoteCV = cvSnap.data();
         syncCvStateRef.data = {
@@ -806,6 +1089,9 @@ export async function hydrateUserWorkspaceFromCloud(user: User): Promise<{
             ...(remoteCV?.education || {})
           }
         };
+        try {
+          localStorage.setItem(`tima_cv_${uid}`, JSON.stringify(syncCvStateRef.data));
+        } catch (_) {}
       }
     }
 
@@ -815,26 +1101,31 @@ export async function hydrateUserWorkspaceFromCloud(user: User): Promise<{
       const items = portSnap.docs.map((d) => normalizePortfolioDoc({ ...d.data(), id: d.id }));
       if (items.length > 0) {
         syncPortfolioRef.items = mergeById(syncPortfolioRef.items || [], items, true);
+        try {
+          localStorage.setItem(`tima_portfolio_${uid}`, JSON.stringify(syncPortfolioRef.items));
+        } catch (_) {}
       }
     }
 
     triggerHydrate();
-    return { foundProfile, role: detectedRole, fallbackUsed: false };
+    return { foundProfile, role: detectedRole, fallbackUsed: false, migratedCount, migratedTypes };
   } catch (err) {
     console.warn('Firestore workspace hydration failed; using offline local cache fallback:', err);
     return {
       foundProfile: Boolean(syncStateRef?.currentUser && syncStateRef.currentUser.uid === uid),
       role: syncStateRef?.currentUser?.role || null,
-      fallbackUsed: true
+      fallbackUsed: true,
+      migratedCount,
+      migratedTypes
     };
   }
 }
 
-export async function syncUserCVToCloud(cvData: any): Promise<boolean> {
-  const user = auth.currentUser;
+export async function syncUserCVToCloud(cvData: any, userOverride?: User | null): Promise<boolean> {
+  const user = userOverride || (await getCurrentAuthUser());
   if (!user || !user.emailVerified) return false;
   const uid = sanitizeId(user.uid, 'uid');
-  const ref = doc(db, 'user_cvs', uid);
+  const ref = doc(db, 'users', uid, 'cv', 'main');
   const cleanPayload = sanitizeUserCVData(cvData, uid);
 
   try {
@@ -854,24 +1145,28 @@ export async function syncUserCVToCloud(cvData: any): Promise<boolean> {
     }
     return true;
   } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `user_cvs/${uid}`);
+    handleFirestoreError(err, OperationType.WRITE, `users/${uid}/cv/main`);
   }
 }
 
 export async function getUserCVFromCloud(uidOverride?: string): Promise<any | null> {
-  const uid = sanitizeId(uidOverride || auth.currentUser?.uid || '', 'uid');
-  if (!auth.currentUser || !uid) return null;
+  const user = await getCurrentAuthUser();
+  const uid = sanitizeId(uidOverride || user?.uid || '', 'uid');
+  if (!user || !uid) return null;
   try {
-    const snap = await getDoc(doc(db, 'user_cvs', uid));
-    return snap.exists() ? snap.data() : null;
+    const subSnap = await getDoc(doc(db, 'users', uid, 'cv', 'main'));
+    if (subSnap.exists()) return subSnap.data();
+    const legacySnap = await getDoc(doc(db, 'user_cvs', uid));
+    return legacySnap.exists() ? legacySnap.data() : null;
   } catch (err) {
-    handleFirestoreError(err, OperationType.GET, `user_cvs/${uid}`);
+    handleFirestoreError(err, OperationType.GET, `users/${uid}/cv/main`);
   }
 }
 
 export async function getPortfolioItemsFromCloud(uidOverride?: string): Promise<any[]> {
-  const uid = sanitizeId(uidOverride || auth.currentUser?.uid || '', 'uid');
-  if (!auth.currentUser || !uid) return [];
+  const user = await getCurrentAuthUser();
+  const uid = sanitizeId(uidOverride || user?.uid || '', 'uid');
+  if (!user || !uid) return [];
   try {
     const snap = await getDocs(query(collection(db, 'portfolio_items'), where('ownerUid', '==', uid)));
     return snap.docs.map((d) => normalizePortfolioDoc({ ...d.data(), id: d.id }));
@@ -948,6 +1243,8 @@ export async function syncStudentRegistrationToCloud(student: any, totalPoints =
 
   try {
     await batch.commit();
+    localStorage.removeItem(GUEST_PENDING_PROGRESS_KEY);
+    migrateGuestLocalDataToCloud(user).catch(() => {});
     return uid;
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `students/${studentId}`);
@@ -1007,15 +1304,19 @@ export async function syncAdminAddedStudentToCloud(student: any) {
   }
 }
 
-export async function syncStudentProgressToCloud(studentId: string, patch: any) {
-  const user = auth.currentUser;
-  if (!user || !user.emailVerified || !studentId) return;
+export async function syncStudentProgressToCloud(
+  studentId: string,
+  patch: any,
+  userOverride?: User | null
+): Promise<boolean> {
+  const user = userOverride || (await getCurrentAuthUser());
+  if (!user || !user.emailVerified || !studentId) return false;
   const sid = sanitizeId(studentId, 'stud');
 
   try {
     const ref = doc(db, 'students', sid);
     const snap = await getDoc(ref);
-    if (!snap.exists()) return;
+    if (!snap.exists()) return false;
 
     const allowedPrivate: Record<string, any> = { updatedAt: serverTimestamp() };
     const allowedPublic: Record<string, any> = { updatedAt: serverTimestamp() };
@@ -1045,6 +1346,7 @@ export async function syncStudentProgressToCloud(studentId: string, patch: any) 
     batch.update(ref, allowedPrivate);
     batch.update(doc(db, 'students_public', sid), allowedPublic);
     await batch.commit();
+    return true;
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, `students/${sid}`);
   }
@@ -1169,6 +1471,7 @@ export async function syncMentorRegistrationToCloud(mentor: any, verif: any) {
 
   try {
     await batch.commit();
+    migrateGuestLocalDataToCloud(user).catch(() => {});
     return uid;
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `mentors/${mentorId}`);
@@ -1236,6 +1539,7 @@ export async function syncCompanyRegistrationToCloud(company: any, verif: any) {
 
   try {
     await batch.commit();
+    migrateGuestLocalDataToCloud(user).catch(() => {});
     return uid;
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `companies/${compId}`);
@@ -1327,8 +1631,9 @@ export async function syncAdminDeleteEntityFromCloud(entityType: 'mentor' | 'com
   }
 }
 
-export async function syncJobCreateToCloud(job: any) {
-  const user = await ensureGoogleAuth();
+export async function syncJobCreateToCloud(job: any, userOverride?: User | null): Promise<boolean> {
+  const user = userOverride || (await getCurrentAuthUser());
+  if (!user || !user.emailVerified) return false;
   const jobId = sanitizeId(job.id, 'job');
   try {
     await setDoc(doc(db, 'jobs', jobId), {
@@ -1349,14 +1654,15 @@ export async function syncJobCreateToCloud(job: any) {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
+    return true;
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `jobs/${jobId}`);
   }
 }
 
 export async function syncJobStatusUpdateToCloud(jobId: string, status: string) {
-  const user = auth.currentUser;
-  if (!user || !user.emailVerified) return;
+  const user = await getCurrentAuthUser();
+  if (!user || !user.emailVerified) return false;
   const id = sanitizeId(jobId, 'job');
   try {
     const ref = doc(db, 'jobs', id);
@@ -1365,21 +1671,28 @@ export async function syncJobStatusUpdateToCloud(jobId: string, status: string) 
         status: status === 'مغلق' ? 'مغلق' : 'نشط',
         updatedAt: serverTimestamp()
       });
+      return true;
     }
+    return false;
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, `jobs/${id}`);
   }
 }
 
-export async function syncApplicationCreateToCloud(appItem: any, newApplicantsCount: number) {
-  const user = await ensureGoogleAuth();
+export async function syncApplicationCreateToCloud(
+  appItem: any,
+  newApplicantsCount: number,
+  userOverride?: User | null
+): Promise<boolean> {
+  const user = userOverride || (await getCurrentAuthUser());
+  if (!user || !user.emailVerified) return false;
   const appId = sanitizeId(appItem.id, 'app');
   const jobId = sanitizeId(appItem.jobId, 'job');
 
   try {
     const jobRef = doc(db, 'jobs', jobId);
     const jobSnap = await getDoc(jobRef);
-    if (!jobSnap.exists()) return;
+    if (!jobSnap.exists()) return false;
 
     const batch = writeBatch(db);
     batch.set(doc(db, 'applications', appId), {
@@ -1404,14 +1717,15 @@ export async function syncApplicationCreateToCloud(appItem: any, newApplicantsCo
       updatedAt: serverTimestamp()
     });
     await batch.commit();
+    return true;
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `applications/${appId}`);
   }
 }
 
-export async function syncChallengeCreateToCloud(ch: any) {
-  const user = auth.currentUser;
-  if (!user || !isFirebaseAdminUser(user)) return;
+export async function syncChallengeCreateToCloud(ch: any): Promise<boolean> {
+  const user = await getCurrentAuthUser();
+  if (!user || !isFirebaseAdminUser(user)) return false;
   const chId = sanitizeId(ch.id, 'ch');
   try {
     await setDoc(doc(db, 'challenges', chId), {
@@ -1426,6 +1740,7 @@ export async function syncChallengeCreateToCloud(ch: any) {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
+    return true;
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `challenges/${chId}`);
   }
@@ -1442,14 +1757,15 @@ export async function syncChallengeDeleteToCloud(chId: string) {
   }
 }
 
-export async function syncBookingCreateToCloud(booking: any) {
-  const user = await ensureGoogleAuth();
+export async function syncBookingCreateToCloud(booking: any, userOverride?: User | null): Promise<boolean> {
+  const user = userOverride || (await getCurrentAuthUser());
+  if (!user || !user.emailVerified) return false;
   const bookingId = sanitizeId(booking.id, 'book');
   const mentorId = sanitizeId(booking.mentorId, 'mentor');
 
   try {
     const mentorSnap = await getDoc(doc(db, 'mentors_public', mentorId));
-    if (!mentorSnap.exists()) return;
+    if (!mentorSnap.exists()) return false;
 
     await setDoc(doc(db, 'bookings', bookingId), {
       id: bookingId,
@@ -1468,6 +1784,7 @@ export async function syncBookingCreateToCloud(booking: any) {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
+    return true;
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `bookings/${bookingId}`);
   }
@@ -1480,9 +1797,11 @@ export async function syncBookingRatingToCloud(
   comment: string,
   newAvgRating: string,
   reviewsList: any[],
-  sessionsCount: number
-) {
-  const user = await ensureGoogleAuth();
+  sessionsCount: number,
+  userOverride?: User | null
+): Promise<boolean> {
+  const user = userOverride || (await getCurrentAuthUser());
+  if (!user || !user.emailVerified) return false;
   const mid = sanitizeId(mentorId, 'mentor');
 
   try {
@@ -1527,13 +1846,19 @@ export async function syncBookingRatingToCloud(
     if (hasWrites) {
       await batch.commit();
     }
+    return hasWrites;
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, `mentors_public/${mid}`);
   }
 }
 
-export async function syncSubmissionCreateToCloud(sub: any, challengeSubmissionsCount?: number) {
-  const user = await ensureGoogleAuth();
+export async function syncSubmissionCreateToCloud(
+  sub: any,
+  challengeSubmissionsCount?: number,
+  userOverride?: User | null
+): Promise<boolean> {
+  const user = userOverride || (await getCurrentAuthUser());
+  if (!user || !user.emailVerified) return false;
   const subId = sanitizeId(sub.id, 'sub');
   const chId = sanitizeId(sub.challengeId, 'ch');
   try {
@@ -1567,13 +1892,15 @@ export async function syncSubmissionCreateToCloud(sub: any, challengeSubmissions
         });
       }
     }
+    return true;
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `submissions/${subId}`);
   }
 }
 
-export async function syncReportCreateToCloud(report: any) {
-  const user = await ensureGoogleAuth();
+export async function syncReportCreateToCloud(report: any, userOverride?: User | null): Promise<boolean> {
+  const user = userOverride || (await getCurrentAuthUser());
+  if (!user || !user.emailVerified) return false;
   const repId = sanitizeId(report.id, 'rep');
   try {
     await setDoc(doc(db, 'reports', repId), {
@@ -1590,6 +1917,7 @@ export async function syncReportCreateToCloud(report: any) {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
+    return true;
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `reports/${repId}`);
   }
@@ -1612,9 +1940,9 @@ export async function syncReportActionToCloud(reportId: string, status: string) 
   }
 }
 
-export async function syncBlacklistIpAddToCloud(item: any) {
-  const user = auth.currentUser;
-  if (!user || !isFirebaseAdminUser(user)) return;
+export async function syncBlacklistIpAddToCloud(item: any): Promise<boolean> {
+  const user = await getCurrentAuthUser();
+  if (!user || !isFirebaseAdminUser(user)) return false;
   const ipId = sanitizeId(item.id || item.ip, 'ip');
   try {
     await setDoc(doc(db, 'blacklist_ips', ipId), {
@@ -1626,6 +1954,7 @@ export async function syncBlacklistIpAddToCloud(item: any) {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
+    return true;
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `blacklist_ips/${ipId}`);
   }
@@ -1642,14 +1971,19 @@ export async function syncBlacklistIpDeleteToCloud(ipIdOrIp: string) {
   }
 }
 
-export async function syncPortfolioItemCreateToCloud(item: any) {
-  const user = auth.currentUser;
-  if (!user || !user.emailVerified) return;
+export async function syncPortfolioItemCreateToCloud(item: any, userOverride?: User | null): Promise<boolean> {
+  const user = userOverride || (await getCurrentAuthUser());
+  if (!user || !user.emailVerified) return false;
   const itemId = sanitizeId(item.id, 'port');
   const rawUrl = item.url || item.link || item.fileUrl || '';
   const safeUrl = rawUrl.startsWith('blob:') ? `idb://${itemId}` : clampMediaRef(rawUrl, 150000, `idb://${itemId}`);
   try {
-    await setDoc(doc(db, 'portfolio_items', itemId), {
+    const ref = doc(db, 'portfolio_items', itemId);
+    const existingSnap = await getDoc(ref);
+    if (existingSnap.exists()) {
+      return true;
+    }
+    await setDoc(ref, {
       id: itemId,
       ownerUid: sanitizeId(user.uid, 'uid'),
       studentName: clampStr(item.studentName, 120),
@@ -1667,6 +2001,7 @@ export async function syncPortfolioItemCreateToCloud(item: any) {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
+    return true;
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `portfolio_items/${itemId}`);
   }
@@ -1687,7 +2022,7 @@ export async function syncPortfolioItemDecisionToCloud(itemId: string, approvalS
 }
 
 export async function syncPortfolioItemDeleteFromCloud(itemId: string) {
-  const user = auth.currentUser;
+  const user = await getCurrentAuthUser();
   if (!user || !user.emailVerified) return;
   const id = sanitizeId(itemId, 'port');
   try {

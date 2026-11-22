@@ -852,5 +852,24 @@ service cloud.firestore {
         incoming().updatedAt == request.time;
       allow delete: if isValidId(userId) && (isOwner(userId) || isAdmin());
     }
+
+    // ---------------------------------------------------------
+    // 18. USER CV SUBCOLLECTION (users/{userId}/cv/{cvId})
+    // ---------------------------------------------------------
+    match /users/{userId}/cv/{cvId} {
+      allow get: if isValidId(userId) && isValidId(cvId) && (isOwner(userId) || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+      allow create: if isValidId(userId) && isValidId(cvId) && isVerifiedEmail() && isOwner(userId) &&
+        isValidUserCV(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isValidId(cvId) && isVerifiedEmail() && (isOwner(userId) || isAdmin()) &&
+        isValidUserCV(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isValidId(userId) && isValidId(cvId) && (isOwner(userId) || isAdmin());
+    }
   }
 }

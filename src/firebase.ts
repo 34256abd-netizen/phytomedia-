@@ -154,3 +154,12 @@ export async function signOutFirebase(): Promise<void> {
 export function subscribeAuthState(callback: (user: User | null) => void): () => void {
   return onAuthStateChanged(auth, callback);
 }
+
+export async function getCurrentAuthUser(): Promise<User | null> {
+  if (typeof auth.authStateReady === 'function') {
+    try {
+      await auth.authStateReady();
+    } catch (_) {}
+  }
+  return auth.currentUser;
+}
