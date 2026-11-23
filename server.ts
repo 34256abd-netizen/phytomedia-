@@ -5,7 +5,6 @@ import path from 'node:path';
 
 const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_NOTIFICATION_EMAIL = 'phytomedia10@gmail.com';
-const TELEGRAM_ADMIN_CHAT_ID = '2036611368';
 const ALLOWED_EVENT_TYPES = new Set([
   'تسجيل جديد',
   'طلب جديد',
@@ -187,12 +186,14 @@ async function sendTelegramRegistrationAlert(data: NotificationPayload): Promise
     `وقت التسجيل: ${data.registeredAt}`,
   ].join('\n');
 
+  const chatId = process.env.TELEGRAM_CHAT_ID?.trim() || '2036611368';
+
   try {
     const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: TELEGRAM_ADMIN_CHAT_ID,
+        chat_id: chatId,
         text,
       }),
       signal: AbortSignal.timeout(8000),
