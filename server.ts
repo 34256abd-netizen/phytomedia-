@@ -5,6 +5,7 @@ import path from 'node:path';
 
 const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_NOTIFICATION_EMAIL = 'phytomedia10@gmail.com';
+const TELEGRAM_ADMIN_CHAT_ID = '2036611368';
 const ALLOWED_EVENT_TYPES = new Set([
   'تسجيل جديد',
   'طلب جديد',
@@ -70,6 +71,153 @@ function isDuplicateEvent(key: string): boolean {
   return false;
 }
 
+interface NotificationPayload {
+  eventType: string;
+  roleLabel: string;
+  personName: string;
+  personEmail: string;
+  personPhone: string;
+  specialty: string;
+  registeredAt: string;
+}
+
+async function sendAdminEmailAlert(data: NotificationPayload): Promise<{ sent: boolean; skipped?: boolean; error?: string }> {
+  const emailUser = process.env.EMAIL_USER?.trim() || '';
+  const emailAppPassword = process.env.EMAIL_APP_PASSWORD?.trim() || '';
+
+  if (!emailUser || !emailAppPassword) {
+    console.warn('[AdminEmail] EMAIL_USER or EMAIL_APP_PASSWORD is not configured; email notification skipped.');
+    return { sent: false, skipped: true };
+  }
+
+  const specialtyDisplay = data.specialty || 'غير محدد (عميل)';
+  const subject = `[φ To Media] ${data.eventType} - ${data.personName}`.slice(0, 180);
+
+  const textBody = [
+    'إشعار إداري جديد من منصة φ To Media',
+    '======================================',
+    `نوع الحدث: ${data.eventType} (${data.roleLabel})`,
+    `اسم الشخص: ${data.personName}`,
+    `الإيميل: ${data.personEmail}`,
+    `رقم التليفون: ${data.personPhone}`,
+    `التخصص: ${specialtyDisplay}`,
+    `وقت التسجيل: ${data.registeredAt}`,
+  ].join('\n');
+
+  const htmlBody = `
+    <div dir="rtl" style="font-family: Tahoma, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #faf7ff; border: 1px solid #e9d5ff; border-radius: 16px; overflow: hidden;">
+      <div style="background: linear-gradient(135deg, #7C3AED, #EC4899); padding: 20px 24px; color: #ffffff;">
+        <h2 style="margin: 0; font-size: 18px;">إشعار إداري تلقائي — φ To Media</h2>
+        <p style="margin: 6px 0 0; font-size: 13px; opacity: 0.92;">${escapeHtml(data.eventType)} (${escapeHtml(data.roleLabel)})</p>
+      </div>
+      <div style="padding: 20px 24px; background-color: #ffffff; color: #1E1B4B;">
+        <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+          <tr>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; font-weight: bold; width: 35%; color: #6B21A8;">نوع الحدث</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff;">${escapeHtml(data.eventType)} — ${escapeHtml(data.roleLabel)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; font-weight: bold; color: #6B21A8;">اسم الشخص</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff;">${escapeHtml(data.personName)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; font-weight: bold; color: #6B21A8;">الإيميل</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; direction: ltr; text-align: right;">${escapeHtml(data.personEmail)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; font-weight: bold; color: #6B21A8;">رقم التليفون</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; direction: ltr; text-align: right;">${escapeHtml(data.personPhone)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; font-weight: bold; color: #6B21A8;">التخصص</td>
+            <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff;">${escapeHtml(specialtyDisplay)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 12px; font-weight: bold; color: #6B21A8;">وقت التسجيل</td>
+            <td style="padding: 10px 12px;">${escapeHtml(data.registeredAt)}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  `;
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: {
+        user: emailUser,
+        pass: emailAppPassword,
+      },
+    });
+
+    await transporter.sendMail({
+      from: `"φ To Media Notifications" <${emailUser}>`,
+      to: ADMIN_NOTIFICATION_EMAIL,
+      subject,
+      text: textBody,
+      html: htmlBody,
+    });
+
+    return { sent: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'SMTP delivery failed';
+    console.error('[AdminEmail] Failed to send email:', message);
+    return { sent: false, error: 'SMTP_DELIVERY_FAILED' };
+  }
+}
+
+async function sendTelegramRegistrationAlert(data: NotificationPayload): Promise<{ sent: boolean; skipped?: boolean; error?: string }> {
+  if (data.eventType !== 'تسجيل جديد' && data.eventType !== 'تسجيل جديد / طلب جديد') {
+    return { sent: false, skipped: true };
+  }
+
+  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim() || '';
+  if (!botToken) {
+    console.warn('[Telegram] TELEGRAM_BOT_TOKEN is not configured; Telegram registration alert skipped.');
+    return { sent: false, skipped: true };
+  }
+
+  const text = [
+    '🎉 مستخدم جديد سجل في To Media!',
+    `الاسم: ${data.personName}`,
+    `الدور: ${data.roleLabel}`,
+    `الإيميل: ${data.personEmail}`,
+    `وقت التسجيل: ${data.registeredAt}`,
+  ].join('\n');
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_ADMIN_CHAT_ID,
+        text,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!response.ok) {
+      let description = `HTTP ${response.status}`;
+      try {
+        const errBody = (await response.json()) as { description?: unknown };
+        if (typeof errBody?.description === 'string' && errBody.description) {
+          description = errBody.description;
+        }
+      } catch (_) {}
+      console.error('[Telegram] Failed to send registration alert:', description);
+      return { sent: false, error: 'TELEGRAM_API_ERROR' };
+    }
+
+    return { sent: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Telegram request failed';
+    console.error('[Telegram] Error while sending registration alert:', message);
+    return { sent: false, error: 'TELEGRAM_NETWORK_ERROR' };
+  }
+}
+
 async function startServer(): Promise<void> {
   const app = express();
   app.disable('x-powered-by');
@@ -117,95 +265,26 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const emailUser = process.env.EMAIL_USER?.trim() || '';
-    const emailAppPassword = process.env.EMAIL_APP_PASSWORD?.trim() || '';
+    const payload: NotificationPayload = {
+      eventType,
+      roleLabel,
+      personName,
+      personEmail,
+      personPhone,
+      specialty,
+      registeredAt,
+    };
 
-    if (!emailUser || !emailAppPassword) {
-      console.warn('[AdminEmail] EMAIL_USER or EMAIL_APP_PASSWORD is not configured; email notification skipped.');
-      res.status(200).json({
-        ok: false,
-        skipped: true,
-        reason: 'SMTP_NOT_CONFIGURED',
-      });
-      return;
-    }
+    const [emailResult, telegramResult] = await Promise.all([
+      sendAdminEmailAlert(payload),
+      sendTelegramRegistrationAlert(payload),
+    ]);
 
-    const specialtyDisplay = specialty || 'غير محدد (عميل)';
-    const subject = `[φ To Media] ${eventType} - ${personName}`.slice(0, 180);
-
-    const textBody = [
-      'إشعار إداري جديد من منصة φ To Media',
-      '======================================',
-      `نوع الحدث: ${eventType} (${roleLabel})`,
-      `اسم الشخص: ${personName}`,
-      `الإيميل: ${personEmail}`,
-      `رقم التليفون: ${personPhone}`,
-      `التخصص: ${specialtyDisplay}`,
-      `وقت التسجيل: ${registeredAt}`,
-    ].join('\n');
-
-    const htmlBody = `
-      <div dir="rtl" style="font-family: Tahoma, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #faf7ff; border: 1px solid #e9d5ff; border-radius: 16px; overflow: hidden;">
-        <div style="background: linear-gradient(135deg, #7C3AED, #EC4899); padding: 20px 24px; color: #ffffff;">
-          <h2 style="margin: 0; font-size: 18px;">إشعار إداري تلقائي — φ To Media</h2>
-          <p style="margin: 6px 0 0; font-size: 13px; opacity: 0.92;">${escapeHtml(eventType)} (${escapeHtml(roleLabel)})</p>
-        </div>
-        <div style="padding: 20px 24px; background-color: #ffffff; color: #1E1B4B;">
-          <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-            <tr>
-              <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; font-weight: bold; width: 35%; color: #6B21A8;">نوع الحدث</td>
-              <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff;">${escapeHtml(eventType)} — ${escapeHtml(roleLabel)}</td>
-            </tr>
-            <tr>
-              <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; font-weight: bold; color: #6B21A8;">اسم الشخص</td>
-              <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff;">${escapeHtml(personName)}</td>
-            </tr>
-            <tr>
-              <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; font-weight: bold; color: #6B21A8;">الإيميل</td>
-              <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; direction: ltr; text-align: right;">${escapeHtml(personEmail)}</td>
-            </tr>
-            <tr>
-              <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; font-weight: bold; color: #6B21A8;">رقم التليفون</td>
-              <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; direction: ltr; text-align: right;">${escapeHtml(personPhone)}</td>
-            </tr>
-            <tr>
-              <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff; font-weight: bold; color: #6B21A8;">التخصص</td>
-              <td style="padding: 10px 12px; border-bottom: 1px solid #f3e8ff;">${escapeHtml(specialtyDisplay)}</td>
-            </tr>
-            <tr>
-              <td style="padding: 10px 12px; font-weight: bold; color: #6B21A8;">وقت التسجيل</td>
-              <td style="padding: 10px 12px;">${escapeHtml(registeredAt)}</td>
-            </tr>
-          </table>
-        </div>
-      </div>
-    `;
-
-    try {
-      const transporter = nodemailer.createTransport({
-        host: 'smtp.gmail.com',
-        port: 465,
-        secure: true,
-        auth: {
-          user: emailUser,
-          pass: emailAppPassword,
-        },
-      });
-
-      await transporter.sendMail({
-        from: `"φ To Media Notifications" <${emailUser}>`,
-        to: ADMIN_NOTIFICATION_EMAIL,
-        subject,
-        text: textBody,
-        html: htmlBody,
-      });
-
-      res.status(200).json({ ok: true, sent: true });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'SMTP delivery failed';
-      console.error('[AdminEmail] Failed to send email:', message);
-      res.status(502).json({ ok: false, error: 'Failed to send admin notification email' });
-    }
+    res.status(200).json({
+      ok: emailResult.sent || telegramResult.sent,
+      email: emailResult,
+      telegram: telegramResult,
+    });
   });
 
   if (process.env.NODE_ENV !== 'production') {

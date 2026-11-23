@@ -1228,13 +1228,21 @@ export function validateRoleSignupForm() {
 
 async function sendAdminEmailNotification(payload) {
   try {
-    await fetch('/api/notify-admin', {
+    const res = await fetch('/api/notify-admin', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    if (!res.ok) {
+      console.warn('Admin notification endpoint returned non-OK status:', res.status);
+    } else {
+      const result = await res.json().catch(() => null);
+      if (result && result.telegram && !result.telegram.sent && !result.telegram.skipped) {
+        console.warn('Telegram registration notification failed:', result.telegram.error || 'unknown');
+      }
+    }
   } catch (err) {
-    console.warn('Admin email notification request failed:', err);
+    console.warn('Admin notification request failed:', err);
   }
 }
 
