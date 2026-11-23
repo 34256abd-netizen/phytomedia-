@@ -257,8 +257,11 @@ function triggerHydrate() {
 
 function attachPublicListeners() {
   clearSubs(publicUnsubs);
+  if (!auth.currentUser || !auth.currentUser.emailVerified) {
+    return;
+  }
 
-  // 1. Public Mentors Directory (Zero PII)
+  // 1. Public Mentors Directory (Zero PII, signed-in platform users only)
   try {
     const qMentors = query(
       collection(db, 'mentors_public'),
@@ -278,6 +281,7 @@ function attachPublicListeners() {
           triggerHydrate();
         },
         (err) => {
+          if (!auth.currentUser) return;
           handleFirestoreError(err, OperationType.LIST, 'mentors_public');
         }
       )
@@ -298,6 +302,7 @@ function attachPublicListeners() {
           triggerHydrate();
         },
         (err) => {
+          if (!auth.currentUser) return;
           handleFirestoreError(err, OperationType.LIST, 'jobs');
         }
       )
@@ -318,6 +323,7 @@ function attachPublicListeners() {
           triggerHydrate();
         },
         (err) => {
+          if (!auth.currentUser) return;
           handleFirestoreError(err, OperationType.LIST, 'challenges');
         }
       )
@@ -690,14 +696,11 @@ export function initFirebaseBridge(state: any, portfolioState: any, onHydrate: (
   // Validate Firestore connection on initial boot
   testConnection();
 
-  // Always listen to public non-PII catalogs (mentors_public, jobs, challenges)
-  attachPublicListeners();
-
-  // Attach user/admin listeners strictly when Firebase Auth state resolves
+  // Attach user/admin/catalog listeners strictly when Firebase Auth state resolves
   subscribeAuthState((user) => {
     clearSubs(activeUnsubs);
+    clearSubs(publicUnsubs);
     if (!user || !user.emailVerified) {
-      attachPublicListeners();
       triggerHydrate();
       return;
     }
@@ -1608,22 +1611,71 @@ export async function syncAdminEntityDecisionToCloud(
   }
 }
 
-export async function syncAdminDeleteEntityFromCloud(entityType: 'mentor' | 'company' | 'student', entityId: string) {
-  const user = auth.currentUser;
-  if (!user || !isFirebaseAdminUser(user)) return;
+export async function syncAdminDeleteEntityFromCloud(
+  entityType: 'mentor' | 'company' | 'student',
+  entityId: string
+): Promise<void> {
+  const user = await getCurrentAuthUser();
+  if (!user || !user.emailVerified) {
+    const authErr: any = new Error('يجب تسجيل الدخول بحساب الأدمن عبر Google أولاً لتنفيذ المسح الحقيقي من Firestore.');
+    authErr.code = 'auth/admin-required';
+    throw authErr;
+  }
+  if (!isFirebaseAdminUser(user)) {
+    const permErr: any = new Error(
+      `حساب Google المسجل حالياً (${user.email || 'غير معروف'}) غير مصرح له بصلاحيات الأدمن لمسح البيانات من Firestore.`
+    );
+    permErr.code = 'permission-denied';
+    throw permErr;
+  }
+
   const id = sanitizeId(entityId, entityType);
 
   try {
     const batch = writeBatch(db);
     if (entityType === 'mentor') {
-      batch.delete(doc(db, 'mentors', id));
+      const mRef = doc(db, 'mentors', id);
+      const mSnap = await getDoc(mRef);
+      const ownerUid = mSnap.exists() ? String(mSnap.data()?.ownerUid || '') : '';
+      batch.delete(mRef);
       batch.delete(doc(db, 'mentors_public', id));
       batch.delete(doc(db, 'verifications', `verif-mentor-${id}`));
+      if (ownerUid && ownerUid !== user.uid) {
+        const uRef = doc(db, 'users', ownerUid);
+        const uSnap = await getDoc(uRef);
+        if (uSnap.exists() && uSnap.data()?.role === 'mentor') {
+          batch.delete(uRef);
+        }
+      }
     } else if (entityType === 'company') {
-      batch.delete(doc(db, 'companies', id));
+      const cRef = doc(db, 'companies', id);
+      const cSnap = await getDoc(cRef);
+      const ownerUid = cSnap.exists() ? String(cSnap.data()?.ownerUid || '') : '';
+      batch.delete(cRef);
+      batch.delete(doc(db, 'verifications', `verif-comp-${id}`));
+      if (ownerUid && ownerUid !== user.uid) {
+        const uRef = doc(db, 'users', ownerUid);
+        const uSnap = await getDoc(uRef);
+        if (uSnap.exists() && uSnap.data()?.role === 'company') {
+          batch.delete(uRef);
+        }
+      }
     } else if (entityType === 'student') {
-      batch.delete(doc(db, 'students', id));
-      batch.delete(doc(db, 'students_public', id));
+      const sRef = doc(db, 'students', id);
+      const spRef = doc(db, 'students_public', id);
+      const sSnap = await getDoc(sRef);
+      const ownerUid = sSnap.exists() ? String(sSnap.data()?.ownerUid || '') : '';
+      batch.delete(sRef);
+      batch.delete(spRef);
+      if (ownerUid && ownerUid !== user.uid) {
+        const uRef = doc(db, 'users', ownerUid);
+        const uSnap = await getDoc(uRef);
+        if (uSnap.exists() && uSnap.data()?.role === 'student') {
+          batch.delete(uRef);
+        }
+        batch.delete(doc(db, 'users', ownerUid, 'cv', 'main'));
+        batch.delete(doc(db, 'user_cvs', ownerUid));
+      }
     }
     await batch.commit();
   } catch (err) {

@@ -36,8 +36,8 @@ service cloud.firestore {
 
     function isBootstrappedAdmin() {
       return isVerifiedEmail() && (
-        request.auth.token.email == '34256abd@gmail.com' ||
-        request.auth.token.email == 'phytomedia10@gmail.com'
+        request.auth.token.email.lower() == '34256abd@gmail.com' ||
+        request.auth.token.email.lower() == 'phytomedia10@gmail.com'
       );
     }
 
@@ -482,10 +482,9 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
-      allow create: if isValidId(userId) && isVerifiedEmail() && isOwner(userId) &&
+      allow create: if isValidId(userId) && isVerifiedEmail() &&
         isValidUserAccount(incoming()) &&
-        incoming().uid == request.auth.uid &&
-        incoming().status in ['active', 'pending_verification'] &&
+        (isAdmin() || (isOwner(userId) && incoming().uid == request.auth.uid && incoming().status in ['active', 'pending_verification'])) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(userId) && isVerifiedEmail() &&
@@ -531,8 +530,8 @@ service cloud.firestore {
     // 4. STUDENTS PUBLIC (No PII - Safe for Talent Search)
     // ---------------------------------------------------------
     match /students_public/{studentId} {
-      allow get: if isValidId(studentId) && (existing().status == 'active' || (isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
-      allow list: if existing().status == 'active' || isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow get: if isValidId(studentId) && isSignedIn() && (existing().status == 'active' || existing().ownerUid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (existing().status == 'active' || isBootstrappedAdmin() || existing().ownerUid == request.auth.uid);
       allow create: if isValidId(studentId) && isVerifiedEmail() &&
         isValidStudentPublic(incoming()) &&
         (isAdmin() || (incoming().ownerUid == request.auth.uid && incoming().status == 'active')) &&
@@ -561,9 +560,7 @@ service cloud.firestore {
       allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
       allow create: if isValidId(mentorId) && isVerifiedEmail() &&
         isValidMentorPrivate(incoming()) &&
-        incoming().ownerUid == request.auth.uid &&
-        incoming().status == 'pending_verification' &&
-        incoming().isVerified == false &&
+        (isAdmin() || (incoming().ownerUid == request.auth.uid && incoming().status == 'pending_verification' && incoming().isVerified == false)) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(mentorId) && isVerifiedEmail() &&
@@ -585,16 +582,14 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------
-    // 6. MENTORS PUBLIC (No PII - Directory Visible to Students & Visitors)
+    // 6. MENTORS PUBLIC (No PII - Directory Visible to Signed-in Users Only)
     // ---------------------------------------------------------
     match /mentors_public/{mentorId} {
-      allow get: if isValidId(mentorId) && (existing().status in ['pending_verification', 'verified'] || isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
-      allow list: if existing().status in ['pending_verification', 'verified'] || isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow get: if isValidId(mentorId) && isSignedIn() && (existing().status in ['pending_verification', 'verified'] || isAdmin() || existing().ownerUid == request.auth.uid);
+      allow list: if isSignedIn() && (existing().status in ['pending_verification', 'verified'] || isBootstrappedAdmin() || existing().ownerUid == request.auth.uid);
       allow create: if isValidId(mentorId) && isVerifiedEmail() &&
         isValidMentorPublic(incoming()) &&
-        incoming().ownerUid == request.auth.uid &&
-        incoming().status == 'pending_verification' &&
-        incoming().isVerified == false &&
+        (isAdmin() || (incoming().ownerUid == request.auth.uid && incoming().status == 'pending_verification' && incoming().isVerified == false)) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(mentorId) && isVerifiedEmail() &&
@@ -623,9 +618,7 @@ service cloud.firestore {
       allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
       allow create: if isValidId(companyId) && isVerifiedEmail() &&
         isValidCompany(incoming()) &&
-        incoming().ownerUid == request.auth.uid &&
-        incoming().status == 'pending_verification' &&
-        incoming().isVerified == false &&
+        (isAdmin() || (incoming().ownerUid == request.auth.uid && incoming().status == 'pending_verification' && incoming().isVerified == false)) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(companyId) && isVerifiedEmail() &&
@@ -648,8 +641,7 @@ service cloud.firestore {
       allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
       allow create: if isValidId(verifId) && isVerifiedEmail() &&
         isValidVerification(incoming()) &&
-        incoming().ownerUid == request.auth.uid &&
-        incoming().status == 'pending' &&
+        (isAdmin() || (incoming().ownerUid == request.auth.uid && incoming().status == 'pending')) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(verifId) && isVerifiedEmail() &&
@@ -662,15 +654,14 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------
-    // 9. JOBS (No PII)
+    // 9. JOBS (No PII - Signed-in Platform Users Only)
     // ---------------------------------------------------------
     match /jobs/{jobId} {
-      allow get: if isValidId(jobId) && (existing().status == 'نشط' || (isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
-      allow list: if existing().status == 'نشط' || isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow get: if isValidId(jobId) && isSignedIn() && (existing().status == 'نشط' || existing().ownerUid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (existing().status == 'نشط' || isBootstrappedAdmin() || existing().ownerUid == request.auth.uid);
       allow create: if isValidId(jobId) && isVerifiedEmail() &&
         isValidJob(incoming()) &&
-        incoming().ownerUid == request.auth.uid &&
-        incoming().status == 'نشط' &&
+        (isAdmin() || (incoming().ownerUid == request.auth.uid && incoming().status == 'نشط')) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(jobId) && isVerifiedEmail() &&
@@ -710,11 +701,11 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------
-    // 11. CHALLENGES (Lab)
+    // 11. CHALLENGES (Lab - Signed-in Users Only)
     // ---------------------------------------------------------
     match /challenges/{challengeId} {
-      allow get: if isValidId(challengeId) && (existing().status == 'نشط' || isAdmin());
-      allow list: if existing().status == 'نشط' || isBootstrappedAdmin();
+      allow get: if isValidId(challengeId) && isSignedIn() && (existing().status == 'نشط' || isAdmin());
+      allow list: if isSignedIn() && (existing().status == 'نشط' || isBootstrappedAdmin());
       allow create: if isValidId(challengeId) && isAdmin() &&
         isValidChallenge(incoming()) &&
         incoming().createdAt == request.time &&
@@ -810,15 +801,14 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------
-    // 16. PORTFOLIO ITEMS
+    // 16. PORTFOLIO ITEMS (Signed-in Users Only)
     // ---------------------------------------------------------
     match /portfolio_items/{itemId} {
-      allow get: if isValidId(itemId) && (existing().approvalStatus == 'approved' || (isSignedIn() && existing().ownerUid == request.auth.uid) || isAdmin());
-      allow list: if existing().approvalStatus == 'approved' || isBootstrappedAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid);
+      allow get: if isValidId(itemId) && isSignedIn() && (existing().approvalStatus == 'approved' || existing().ownerUid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (existing().approvalStatus == 'approved' || isBootstrappedAdmin() || existing().ownerUid == request.auth.uid);
       allow create: if isValidId(itemId) && isVerifiedEmail() &&
         isValidPortfolioItem(incoming()) &&
-        incoming().ownerUid == request.auth.uid &&
-        incoming().approvalStatus == 'pending' &&
+        (isAdmin() || (incoming().ownerUid == request.auth.uid && incoming().approvalStatus == 'pending')) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(itemId) && isVerifiedEmail() &&
@@ -840,9 +830,9 @@ service cloud.firestore {
     match /user_cvs/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
-      allow create: if isValidId(userId) && isVerifiedEmail() && isOwner(userId) &&
+      allow create: if isValidId(userId) && isVerifiedEmail() &&
         isValidUserCV(incoming()) &&
-        incoming().uid == request.auth.uid &&
+        (isAdmin() || (isOwner(userId) && incoming().uid == request.auth.uid)) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(userId) && isVerifiedEmail() && (isOwner(userId) || isAdmin()) &&
@@ -859,9 +849,9 @@ service cloud.firestore {
     match /users/{userId}/cv/{cvId} {
       allow get: if isValidId(userId) && isValidId(cvId) && (isOwner(userId) || isAdmin());
       allow list: if isBootstrappedAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
-      allow create: if isValidId(userId) && isValidId(cvId) && isVerifiedEmail() && isOwner(userId) &&
+      allow create: if isValidId(userId) && isValidId(cvId) && isVerifiedEmail() &&
         isValidUserCV(incoming()) &&
-        incoming().uid == request.auth.uid &&
+        (isAdmin() || (isOwner(userId) && incoming().uid == request.auth.uid)) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(userId) && isValidId(cvId) && isVerifiedEmail() && (isOwner(userId) || isAdmin()) &&

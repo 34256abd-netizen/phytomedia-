@@ -5305,6 +5305,35 @@ export function toggleStudentStatus(studentId) {
   alert(msg);
 }
 
+function formatFirestoreAdminDeleteError(err) {
+  let code = (err && err.code) ? String(err.code) : '';
+  let rawMsg = (err && err.message) ? String(err.message) : String(err || '');
+
+  if (rawMsg.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(rawMsg);
+      if (parsed && parsed.error) rawMsg = String(parsed.error);
+    } catch (_) {}
+  }
+
+  const lower = `${code} ${rawMsg}`.toLowerCase();
+  if (code === 'auth/admin-required' || lower.includes('unauthenticated')) {
+    return '⛔ يجب تسجيل الدخول بحساب الأدمن عبر Google ("مزامنة السحابة عبر Google") أولاً لتنفيذ الحذف من Firestore.';
+  }
+  if (
+    code === 'permission-denied' ||
+    lower.includes('permission-denied') ||
+    lower.includes('permission_denied') ||
+    lower.includes('missing or insufficient permissions')
+  ) {
+    return '⛔ رفضت قواعد Firestore عملية الحذف (صلاحيات غير كافية / PERMISSION_DENIED). تأكد من نشر قواعد Firestore الصحيحة ومن تسجيل الدخول بإيميل الأدمن المعتمد.';
+  }
+  if (code === 'unavailable' || lower.includes('offline') || lower.includes('network')) {
+    return '⛔ تعذر الاتصال بـ Firestore حالياً. تحقق من الإنترنت وحاول مرة أخرى.';
+  }
+  return `⛔ تعذر الحذف من Firestore: ${rawMsg}`;
+}
+
 export function confirmDeleteStudent(studentId) {
   const student = state.students.find(s => s.id === studentId);
   if (!student) return;
@@ -5312,9 +5341,19 @@ export function confirmDeleteStudent(studentId) {
   const modal = document.getElementById('modal-confirm-student-delete');
   const nameEl = document.getElementById('confirm-delete-student-name');
   const idInput = document.getElementById('admin-delete-student-id');
+  const errBox = document.getElementById('admin-delete-student-error');
+  const confirmBtn = document.getElementById('btn-confirm-delete-student');
 
   if (nameEl) nameEl.innerText = `هل أنت متأكد من حذف حساب الطالب (${student.name}) نهائياً من قاعدة البيانات؟ لن يتمكن من تسجيل الدخول.`;
   if (idInput) idInput.value = studentId;
+  if (errBox) {
+    errBox.innerText = '';
+    errBox.classList.add('hidden');
+  }
+  if (confirmBtn) {
+    confirmBtn.disabled = false;
+    confirmBtn.innerText = 'نعم، احذف الحساب 🗑️';
+  }
 
   if (modal) {
     modal.classList.remove('hidden');
@@ -5325,29 +5364,76 @@ export function confirmDeleteStudent(studentId) {
 
 export function closeDeleteStudentModal() {
   const modal = document.getElementById('modal-confirm-student-delete');
+  const errBox = document.getElementById('admin-delete-student-error');
+  const confirmBtn = document.getElementById('btn-confirm-delete-student');
+  if (errBox) {
+    errBox.innerText = '';
+    errBox.classList.add('hidden');
+  }
+  if (confirmBtn) {
+    confirmBtn.disabled = false;
+    confirmBtn.innerText = 'نعم، احذف الحساب 🗑️';
+  }
   if (modal) {
     modal.classList.add('hidden');
     modal.classList.remove('flex');
   }
 }
 
-export function executeDeleteStudent() {
+export async function executeDeleteStudent() {
   const idInput = document.getElementById('admin-delete-student-id');
   const studentId = idInput?.value;
   if (!studentId) return;
 
   const deletedStudent = state.students.find(s => s.id === studentId);
   const studentName = deletedStudent ? deletedStudent.name : 'الطالب';
+  const errBox = document.getElementById('admin-delete-student-error');
+  const confirmBtn = document.getElementById('btn-confirm-delete-student');
+  const cancelBtn = document.getElementById('btn-cancel-delete-student');
 
+  if (errBox) {
+    errBox.innerText = '';
+    errBox.classList.add('hidden');
+  }
+  if (confirmBtn) {
+    confirmBtn.disabled = true;
+    confirmBtn.innerText = 'جاري المسح من Firestore... ⏳';
+  }
+  if (cancelBtn) cancelBtn.disabled = true;
+
+  try {
+    await syncAdminDeleteEntityFromCloud('student', studentId);
+  } catch (err) {
+    const friendlyMsg = formatFirestoreAdminDeleteError(err);
+    if (errBox) {
+      errBox.innerText = friendlyMsg;
+      errBox.classList.remove('hidden');
+    }
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.innerText = 'نعم، احذف الحساب 🗑️';
+    }
+    if (cancelBtn) cancelBtn.disabled = false;
+    showToast(friendlyMsg, { type: 'warning', duration: 8000 });
+    return;
+  }
+
+  if (cancelBtn) cancelBtn.disabled = false;
   state.students = state.students.filter(s => s.id !== studentId);
+  if (Array.isArray(state.verifications)) {
+    state.verifications = state.verifications.filter(v => !(v.role === 'student' && v.userId === studentId));
+  }
+  if (state.currentUser && state.currentUser.id === studentId) {
+    state.currentUser = null;
+  }
   saveToStorage();
-  syncAdminDeleteEntityFromCloud('student', studentId).catch(() => {});
 
   closeDeleteStudentModal();
   renderAdminStudentsTable();
+  renderAdminAllUsersTable();
   renderAdminApp();
 
-  alert(`🗑️ تم حذف حساب الطالب (${studentName}) نهائياً من المنظومة.`);
+  showToast(`🗑️ تم حذف حساب الطالب (${studentName}) نهائياً من Firestore ✅`, { type: 'success' });
 }
 
 export function openAdminAddStudentModal() {
@@ -5613,22 +5699,31 @@ export function toggleMentorStatus(mentorId) {
   );
 }
 
-export function deleteAdminMentor(mentorId) {
+export async function deleteAdminMentor(mentorId) {
   const mentor = state.mentors.find(m => m.id === mentorId);
   if (!mentor) return;
   const mentorName = mentor.fullName || mentor.name || 'الخبير';
 
+  try {
+    await syncAdminDeleteEntityFromCloud('mentor', mentorId);
+  } catch (err) {
+    const friendlyMsg = formatFirestoreAdminDeleteError(err);
+    showToast(friendlyMsg, { type: 'warning', duration: 8000 });
+    alert(friendlyMsg);
+    return;
+  }
+
   state.mentors = state.mentors.filter(m => m.id !== mentorId);
   state.verifications = state.verifications.filter(v => !(v.role === 'mentor' && v.userId === mentorId));
   saveToStorage();
-  syncAdminDeleteEntityFromCloud('mentor', mentorId).catch(() => {});
 
   renderAdminApp();
   renderAdminMentorsTable();
+  renderAdminAllUsersTable();
   renderAdminProtectionTab();
   renderMentorsList();
 
-  alert(`🗑️ تم حذف حساب الخبير (${mentorName}) نهائياً من المنظومة.`);
+  showToast(`🗑️ تم حذف حساب الخبير (${mentorName}) نهائياً من Firestore ✅`, { type: 'success' });
 }
 
 // -------------------------------------------------------------
@@ -5860,20 +5955,28 @@ export function toggleCompanyStatus(compId) {
   );
 }
 
-export function deleteAdminCompany(compId) {
+export async function deleteAdminCompany(compId) {
   const comp = (state.companies || []).find(c => c.id === compId);
   if (!comp) return;
   const compName = comp.name || 'المؤسسة';
 
+  try {
+    await syncAdminDeleteEntityFromCloud('company', compId);
+  } catch (err) {
+    const friendlyMsg = formatFirestoreAdminDeleteError(err);
+    showToast(friendlyMsg, { type: 'warning', duration: 8000 });
+    alert(friendlyMsg);
+    return;
+  }
+
   state.companies = state.companies.filter(c => c.id !== compId);
   state.verifications = state.verifications.filter(v => !(v.role === 'company' && v.userId === compId));
   saveToStorage();
-  syncAdminDeleteEntityFromCloud('company', compId).catch(() => {});
 
   renderAdminApp();
   renderAdminAllUsersTable();
   renderAdminProtectionTab();
-  alert(`🗑️ تم حذف المؤسسة (${compName}) نهائياً من المنظومة.`);
+  showToast(`🗑️ تم حذف المؤسسة (${compName}) نهائياً من Firestore ✅`, { type: 'success' });
 }
 
 // -------------------------------------------------------------
